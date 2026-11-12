@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Controid
+Comment=Centro de Control e Integración Nativa Android - Linux
+Exec=controid-gui
+Icon=controid
+Terminal=false
+Categories=Utility;Network;System;
+Keywords=Android;Bluetooth;Hotspot;Screen;Clipboard;
+StartupNotify=true
+StartupWMClass=org.controid.ControlCenter

@@ -1,0 +1,19 @@
+# Rust
+/daemon/target/
+**/*.rs.bk
+Cargo.lock
+
+# Android / Gradle
+/android/.gradle/
+/android/build/
+/android/*/build/
+/android/local.properties
+*.iml
+/.idea/
+*.keystore
+*.jks
+
+# Runtime / Temp
+*.tmp
+*.sock
+.DS_Store

@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Controid</string>
+    <string name="tile_send_clipboard">Sync Clipboard</string>
+</resources>

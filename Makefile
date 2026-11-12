@@ -3,7 +3,7 @@ CC ?= gcc
 CARGO := cargo --manifest-path daemon/Cargo.toml
 TOOLS_OUT_DIR := daemon/target/tools
 
-.PHONY: all check test clippy fmt build-daemon build-tools build-android install-icons install-gui install-systemd clean
+.PHONY: all check test clippy fmt build-daemon build-tools build-android install-icons install-gui install-systemd install-autostart clean
 
 all: check test
 
@@ -42,8 +42,16 @@ install-gui: install-icons
 	sed -i "s|^Exec=controid-gui|Exec=$(HOME)/.local/bin/controid-gui|" $(HOME)/.local/share/applications/controid.desktop
 
 install-systemd:
-	install -Dm644 systemd/controid.service ~/.config/systemd/user/controid.service
-	systemctl --user daemon-reload
+	install -Dm644 systemd/controid.service $(HOME)/.config/systemd/user/controid.service
+	@if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then \
+		systemctl --user daemon-reload; \
+	else \
+		echo "systemd --user no disponible; usa 'make install-autostart' para arranque XDG."; \
+	fi
+
+install-autostart:
+	install -Dm644 systemd/controidd-autostart.desktop $(HOME)/.config/autostart/controidd.desktop
+	sed -i "s|^Exec=controidd|Exec=$(HOME)/.local/bin/controidd|" $(HOME)/.config/autostart/controidd.desktop
 
 clean:
 	$(CARGO) clean

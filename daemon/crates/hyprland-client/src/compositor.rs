@@ -1,4 +1,6 @@
-use crate::clipboard::{ClipboardEvent, ClipboardPayload, WaylandClipboardDriver};
+use crate::clipboard::{
+    ClipboardEvent, ClipboardPayload, UniversalClipboardDriver, detect_clipboard_backend,
+};
 use crate::uinput::UinputFallbackDevice;
 use anyhow::{Result, anyhow};
 use core_protocol::InputFallbackEvent;
@@ -18,23 +20,25 @@ pub trait CompositorBackend: Send + Sync {
 }
 
 #[derive(Debug, Default)]
-pub struct HyprlandBackend {
+pub struct LinuxDesktopBackend {
     uinput: Mutex<Option<UinputFallbackDevice>>,
 }
 
-impl HyprlandBackend {
+pub type HyprlandBackend = LinuxDesktopBackend;
+
+impl LinuxDesktopBackend {
     pub fn new() -> Self {
         Self::default()
     }
 }
 
-impl CompositorBackend for HyprlandBackend {
+impl CompositorBackend for LinuxDesktopBackend {
     fn name(&self) -> &'static str {
-        "hyprland-wlroots"
+        detect_clipboard_backend().as_str()
     }
 
     fn watch_clipboard(&self) -> mpsc::Receiver<ClipboardEvent> {
-        WaylandClipboardDriver::spawn_watcher()
+        UniversalClipboardDriver::spawn_watcher()
     }
 
     fn set_clipboard<'a>(
@@ -42,7 +46,7 @@ impl CompositorBackend for HyprlandBackend {
         payload: ClipboardPayload,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
         Box::pin(async move {
-            WaylandClipboardDriver::write_clipboard(payload).await?;
+            UniversalClipboardDriver::write_clipboard(payload).await?;
             Ok(())
         })
     }
@@ -68,12 +72,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hyprland_backend_is_send_sync_and_named() {
+    fn desktop_backend_is_send_sync_and_named() {
         fn assert_send_sync<T: Send + Sync>() {}
-        assert_send_sync::<HyprlandBackend>();
+        assert_send_sync::<LinuxDesktopBackend>();
 
-        let backend = HyprlandBackend::new();
+        let backend = LinuxDesktopBackend::new();
         let dyn_backend: &dyn CompositorBackend = &backend;
-        assert_eq!(dyn_backend.name(), "hyprland-wlroots");
+        assert!(matches!(
+            dyn_backend.name(),
+            "wayland-ext-data-control"
+                | "wayland-wlr-data-control"
+                | "x11"
+                | "unavailable"
+        ));
     }
 }

@@ -7,7 +7,7 @@ use core_protocol::{
     FLAG_START, FlowController, Frame, MAX_PAYLOAD_SIZE, StreamStartMeta, compute_binary_echo_hash,
     compute_clipboard_echo_hash,
 };
-use hyprland_client::{ClipboardEvent, ClipboardPayload, CompositorBackend, HyprlandBackend};
+use hyprland_client::{ClipboardEvent, ClipboardPayload, CompositorBackend, LinuxDesktopBackend};
 use serde_json::json;
 use std::collections::HashMap;
 use std::io::{self, ErrorKind};
@@ -132,7 +132,7 @@ impl ClipboardWorker {
             sender,
             outbound_clip_flow,
             echo_suppressor,
-            compositor: Arc::new(HyprlandBackend::new()),
+            compositor: Arc::new(LinuxDesktopBackend::new()),
             events_tx,
             inbound_streams: HashMap::new(),
             next_stream_id: Arc::new(AtomicU16::new(1)),

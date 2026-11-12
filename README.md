@@ -37,15 +37,17 @@ Controid une tu teléfono Android y tu escritorio Linux en una sola experiencia 
   - exponer el almacenamiento interno por FUSE.
 
 ### 2. En Linux
-- **Entorno gráfico Wayland** con soporte para `zwlr_data_control_manager_v1` (necesario para sincronizar el portapapeles en segundo plano; consulta la sección [Compatibilidad y limitaciones](#compatibilidad-y-limitaciones)).
-- **Servicios del sistema activos:**
-  - `systemd --user`
-  - `bluetooth.service` (BlueZ)
-  - `NetworkManager.service` (para autoconexión al hotspot Wi-Fi y detección de red)
+- **Entorno gráfico Wayland o X11:**
+  - **Wayland** con `ext_data_control_manager_v1` (KDE Plasma 6, GNOME/Mutter moderno) o `zwlr_data_control_manager_v1` (Hyprland, Sway, River, Wayfire, LabWC, Niri).
+  - **X11 / Xorg** nativo (mediante `XFixes` sobre `CLIPBOARD`, texto e imágenes) y respaldo automático vía **XWayland** si un compositor Wayland no expone `data-control`.
+- **Servicios del sistema:**
+  - Gestor de sesiones `systemd --user`, **o** autostart estándar XDG (`~/.config/autostart/controidd.desktop`) / OpenRC / runit / s6 en distribuciones sin `systemd`.
+  - `bluetoothd` (BlueZ) para BLE y perfil Bluetooth HID.
+  - `NetworkManager` (principal) o `iwd` (`iwctl`) para autoconexión al hotspot Wi-Fi; si ninguno está activo, degrada limpiamente y permite modo **LAN directa**.
 - **Dependencias de compilación y ejecución:**
   - Rust (`cargo` y `rustc`) + compilador C (`gcc`) + `pkg-config`
-  - Librerías de desarrollo: `libudev`, `fuse3`, `sdl2`, `libavcodec`, `libswscale`, `libavutil`
-  - Herramientas de escritorio: `python3` (>= 3.11) con PyGObject (`GTK 4` y `Libadwaita`), `wl-clipboard` (`wl-paste`), y `fusermount3` (opcional: `mpv` como visor secundario).
+  - Librerías de desarrollo: `libudev` (o `eudev`), `fuse3`, `sdl2`, `libavcodec`, `libswscale`, `libavutil`
+  - Herramientas de escritorio: `python3` (>= 3.11) con PyGObject (`GTK 4` y `Libadwaita`), `fusermount3`, y opcionalmente `wl-clipboard` (Wayland), `xclip`/`xsel` (X11) o `mpv` (visor secundario).
 
 #### Instalación rápida de dependencias por distribución
 
@@ -97,8 +99,49 @@ sudo dnf install -y \
 
 </details>
 
-Asegúrate de tener Bluetooth y NetworkManager activos:
+<details>
+<summary><strong>openSUSE (Tumbleweed / Leap)</strong></summary>
+
 ```bash
+sudo zypper install -y \
+  gcc pkg-config cargo rust \
+  libudev-devel fuse3 fuse3-devel libSDL2-devel \
+  ffmpeg-6-libavcodec-devel ffmpeg-6-libswscale-devel ffmpeg-6-libavutil-devel \
+  python3-gobject typelib-1_0-Gtk-4_0 typelib-1_0-Adw-1 \
+  wl-clipboard xclip bluez NetworkManager
+```
+
+</details>
+
+<details>
+<summary><strong>Void Linux (runit)</strong></summary>
+
+```bash
+sudo xbps-install -Sy \
+  base-devel pkg-config cargo rust \
+  eudev-libudev-devel fuse3 fuse3-devel SDL2-devel ffmpeg6-devel \
+  python3-gobject gtk4 libadwaita \
+  wl-clipboard xclip bluez NetworkManager
+```
+
+</details>
+
+<details>
+<summary><strong>Alpine Linux (OpenRC)</strong></summary>
+
+```bash
+sudo apk add \
+  build-base pkgconf cargo rust \
+  eudev-dev fuse3 fuse3-dev sdl2-dev ffmpeg-dev \
+  py3-gobject3 gtk4.0 libadwaita \
+  wl-clipboard xclip bluez networkmanager
+```
+
+</details>
+
+Asegúrate de tener Bluetooth activo y tu gestor de red (`NetworkManager` o `iwd`):
+```bash
+# En distros con systemd:
 sudo systemctl enable --now bluetooth NetworkManager
 ```
 
@@ -117,7 +160,8 @@ Opciones útiles del instalador:
 - `--setup-uinput`: instala una regla `udev` (`/etc/udev/rules.d/99-controid-uinput.rules`) y añade tu usuario al grupo `input` para habilitar el respaldo de ratón/teclado por TCP cuando no uses Bluetooth HID *(puede requerir cerrar e iniciar sesión una vez)*.
 - `--pair`: ejecuta automáticamente el emparejamiento BLE al finalizar.
 - `--offline`: compila el proyecto Rust sin conexión a internet (`cargo --offline`).
-- `--no-systemd`: instala los archivos sin recargar ni iniciar `controid.service`.
+- `--no-systemd`: instala binarios sin ejecutar comandos `systemctl --user`.
+- `--xdg-autostart`: instala `~/.config/autostart/controidd.desktop` para arranque automático en distros o sesiones sin `systemd`.
 
 Los binarios se instalan en `~/.local/bin/`:
 - `controidd`: demonio principal en segundo plano (`controid.service`).
@@ -164,7 +208,11 @@ Ideal para usarlo fuera de casa o cuando el PC no está en la misma red que el m
    - Esto detecta tu teléfono por BLE, guarda su MAC y el SSID de su hotspot en `~/.config/controid/config.toml` e intercambia las llaves de identidad **Ed25519**.
 3. **Inicia el servicio y abre el panel:**
    ```bash
+   # Con systemd:
    systemctl --user enable --now controid.service
+   # Sin systemd (o con ~/.config/autostart/controidd.desktop):
+   controidd &
+
    controid-gui
    ```
 
@@ -183,12 +231,12 @@ Si ambos dispositivos comparten el mismo router Wi-Fi y no quieres activar el ho
 
 ### Desde la interfaz gráfica (`controid-gui`)
 Abre **Controid** desde tu lanzador de aplicaciones o ejecutando `controid-gui`. Desde ahí puedes:
-- Ver estado de conexión, batería, hotspot y estado del servicio `systemd`.
+- Ver estado de conexión, batería, hotspot y controlar el servicio (`systemd` o proceso `controidd` + autostart XDG si no hay `systemd`).
 - Conectar / desconectar manualmente o encender/apagar el hotspot del móvil.
-- Enviar texto o revisar el historial reciente del portapapeles.
+- Enviar texto o revisar el historial reciente del portapapeles (detectando automáticamente Wayland, X11 o el portapapeles nativo de GTK4).
 - Iniciar/detener la duplicación de pantalla y elegir FPS, tasa de bits (Mbps) y códec (`H.264` o `H.265`).
 - Montar/desmontar `~/Controid` y abrir la carpeta directamente.
-- Ejecutar diagnósticos rápidos para verificar BlueZ, NetworkManager, FUSE3, `wl-paste`, `/dev/uinput` y ADB.
+- Ejecutar diagnósticos rápidos para verificar BlueZ, NetworkManager/`iwd`, FUSE3, sesión gráfica/portapapeles, `/dev/uinput`, ADB y logs (`journalctl` o `~/.local/state/controid/controidd.log`).
 
 ### Controles del visor de pantalla (`controid-viewer`)
 Cuando inicias la duplicación de pantalla:
@@ -234,16 +282,21 @@ controid events --waybar            # Flujo NDJSON continuo para barra Waybar (p
 ## Compatibilidad y limitaciones
 
 ### En Android
-- **Funciona de forma general** en cualquier dispositivo con **Android 9 o superior** que soporte **Shizuku** y **BLE**, porque toda la arquitectura se apoya en APIs estándar de Android y servicios Shizuku (`IClipboard`, `MediaStore`, `ITetheringConnector`, `SurfaceControl`/`DisplayManagerGlobal`, `BluetoothHidDevice`), sin código propietario de una marca concreta.
-- **Diferencias posibles según la capa del fabricante (Samsung One UI, Xiaomi HyperOS/MIUI, OnePlus/OPPO ColorOS/OxygenOS, Pixel/AOSP, etc.):**
-  - **Cierre agresivo en segundo plano:** marcas como Xiaomi, OPPO/OnePlus/Realme, Huawei o Samsung pueden pausar servicios si no desactivas la optimización de batería (y en HyperOS/MIUI activar *Inicio automático* / *Depuración USB (Ajustes de seguridad)* para Shizuku).
-  - **Capturas de pantalla:** los sistemas modernos de Android no siempre copian las capturas al portapapeles; Controid vigila `Pictures/Screenshots`, `DCIM/Screenshots` y `MediaStore`. Si un fabricante guarda capturas en una ruta distinta, puede requerir añadir esa carpeta.
-  - **Hotspot 5 GHz:** si el hardware o la ROM restringen SoftAP en 5 GHz, Controid intenta automáticamente respaldo en **2.4 GHz**.
+- **Multi-fabricante (Android 9+ / API 28+):** funciona en AOSP/Pixel, Samsung One UI, Xiaomi HyperOS/MIUI, OnePlus/OPPO ColorOS/OxygenOS, Motorola, Realme, etc. mediante APIs estándar y servicios Shizuku (`IClipboard` con soporte `AttributionSource` en Android 12+, `MediaStore`, `ITetheringConnector` con respaldo `ConnectivityManager`, `SurfaceControl`/`DisplayManagerGlobal`, `BluetoothHidDevice`).
+- **Capturas de pantalla universales:** combina un `ContentObserver` directo sobre `MediaStore.Images.Media.EXTERNAL_CONTENT_URI` con múltiples `FileObserver` (`Pictures/Screenshots`, `DCIM/Screenshots`, `Screenshots`, carpetas localizadas como `Capturas de pantalla`, `MIUI/screenshot` y subcarpetas detectadas dinámicamente), filtrando de forma insensible a mayúsculas por `BUCKET_DISPLAY_NAME`, `RELATIVE_PATH` y `_DATA`, y verificando `IS_PENDING = 0` y tamaño > 0.
+- **Diferencias posibles según el fabricante:**
+  - **Cierre agresivo en segundo plano:** Xiaomi (HyperOS/MIUI), OPPO/OnePlus/Realme (ColorOS) o Samsung pueden restringir servicios si no desactivas la optimización de batería (y en HyperOS/MIUI activar *Inicio automático* / *Depuración USB (Ajustes de seguridad)* para Shizuku).
+  - **Restricciones de portapapeles o tethering:** algunos OEM o operadoras bloquean el aprovisionamiento programático del hotspot o el acceso en segundo plano al portapapeles; Controid intenta respaldos automáticos (5 GHz -> 2.4 GHz, `ITetheringConnector` -> `ConnectivityManager` legado) y reporta diagnósticos claros si el sistema los deniega.
 
 ### En Linux
-- **Portapapeles automático:** el demonio usa el protocolo Wayland `zwlr_data_control_manager_v1` (y la GUI usa `wl-paste`). Funciona directamente en **Hyprland, Sway, River, Wayfire, LabWC, Niri** y entornos Wayland compatibles (KDE Plasma 6 según versión/soporte). **No tiene soporte nativo** en sesiones **X11** ni en **GNOME (Mutter)** salvo extensiones/cambios externos que expongan `wlr-data-control`.
-- **Autoconexión Wi-Fi:** requiere **NetworkManager** por D-Bus (`org.freedesktop.NetworkManager`). Distros configuradas solo con `systemd-networkd` o `iwd` sin NetworkManager solo podrán usar conexión manual o **LAN directa**.
-- **Servicio e inicio automático:** usa **`systemd --user`** (`controid.service`). En distribuciones sin systemd (Alpine, Void con runit, Gentoo con OpenRC, Artix) habrá que lanzar `controidd` con su gestor de servicios propio o manualmente.
+- **Portapapeles universal (Wayland + X11):** `controidd` detecta automáticamente en tiempo de ejecución el mejor backend disponible y reintenta reconectarse si el servidor gráfico cambia o arranca más tarde:
+  1. `ext_data_control_manager_v1` (KDE Plasma 6, GNOME/Mutter modernos).
+  2. `zwlr_data_control_manager_v1` (Hyprland, Sway, River, Wayfire, LabWC, Niri).
+  3. **X11 / XWayland** nativo mediante `x11rb` + `XFixes` sobre `CLIPBOARD` (texto e imágenes PNG/JPEG).
+  - *Limitación restante:* una sesión Wayland pura sin `ext_data_control_v1` ni `zwlr_data_control_v1` **y** sin XWayland (`DISPLAY`) no permite leer/escribir el portapapeles desde procesos en segundo plano.
+- **Autoconexión Wi-Fi y redes:** usa **NetworkManager** (D-Bus) como backend principal con degradación limpia a **`iwd` (`iwctl`)** y lectura de puerta de enlace desde `/proc/net/route`. Si ningún gestor Wi-Fi está activo, el demonio arranca sin errores y soporta el modo **LAN directa**. En `iwd`, la red del hotspot debe haber sido conectada/guardada previamente en `iwctl`.
+- **Distribuciones sin `systemd`:** compatible con Alpine (OpenRC), Void (runit), Artix, Devuan o Gentoo mediante `./install.sh --xdg-autostart` (o `make install-autostart`) y control directo del proceso desde `controid-gui`.
+- **Bandeja del sistema (`controid-tray`):** si el escritorio carece de `StatusNotifierWatcher` (por ejemplo GNOME sin AppIndicator o gestores minimalistas sin barra), la bandeja espera de forma pasiva sin bloquear ni fallar.
 - **Entrada fallback por red:** requiere permiso de escritura sobre `/dev/uinput` (configurable automáticamente con `./install.sh --setup-uinput`).
 
 ---
@@ -256,11 +309,11 @@ Controid/
 ├── daemon/           # Workspace Rust
 │   └── crates/
 │       ├── core-protocol/     # Framing binario, handshake Ed25519, control de flujo y eco
-│       ├── hyprland-client/   # Portapapeles Wayland (wlr-data-control) y uinput
+│       ├── hyprland-client/   # Portapapeles universal (Wayland ext/wlr + X11 XFixes) y uinput
 │       └── linux-daemon/      # controidd, CLI (controid) y bandeja (controid-tray)
 ├── gui/              # Centro de Control gráfico en GTK4 / Libadwaita (controid_gui.py)
 ├── tools/            # Herramientas nativas C (controid-viewer y controid-mount)
-├── systemd/          # Unidad systemd de usuario y lanzador .desktop
+├── systemd/          # Unidad systemd de usuario, lanzador .desktop y autostart XDG
 ├── proto/            # Especificaciones del protocolo v1, BLE GATT e IPC NDJSON
 ├── assets/           # Iconos oficiales de Controid
 └── install.sh        # Script de compilación e instalación en Linux

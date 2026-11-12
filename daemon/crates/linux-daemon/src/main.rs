@@ -7,8 +7,8 @@ use core_protocol::{
 };
 use futures::StreamExt;
 use hyprland_client::{
-    ClipboardEvent, ClipboardPayload, CompositorBackend, HidWatchdog, HyprlandBackend,
-    MpvVideoSink, WaylandClipboardDriver,
+    ClipboardEvent, ClipboardPayload, CompositorBackend, HidWatchdog, LinuxDesktopBackend,
+    MpvVideoSink,
 };
 use linux_daemon::ble;
 use linux_daemon::clipboard_worker::{
@@ -145,7 +145,7 @@ struct DaemonRuntime {
     config: AppConfig,
     identity_key: Arc<IdentityKeyPair>,
     system_dbus: zbus::Connection,
-    session_dbus: zbus::Connection,
+    session_dbus: Option<zbus::Connection>,
     compositor: Arc<dyn CompositorBackend>,
     files: FilesHandle,
     telemetry: DaemonTelemetry,
@@ -282,12 +282,14 @@ impl DaemonRuntime {
             self.retry_count = 0;
             self.retry_sleep = None;
             self.set_state(DaemonLinkState::Idle);
-            notify::notify_fire_and_forget(
-                self.session_dbus.clone(),
-                "Controid Connection Failed",
-                &format!("Unable to connect after {max_retries} retries: {err}"),
-                2,
-            );
+            if let Some(ref session_dbus) = self.session_dbus {
+                notify::notify_fire_and_forget(
+                    session_dbus.clone(),
+                    "Controid Connection Failed",
+                    &format!("Unable to connect after {max_retries} retries: {err}"),
+                    2,
+                );
+            }
         }
     }
 
@@ -1352,9 +1354,13 @@ async fn main() -> Result<()> {
     let system_dbus = zbus::Connection::system()
         .await
         .context("failed to connect to system D-Bus")?;
-    let session_dbus = zbus::Connection::session()
-        .await
-        .context("failed to connect to session D-Bus")?;
+    let session_dbus = match zbus::Connection::session().await {
+        Ok(conn) => Some(conn),
+        Err(err) => {
+            warn!(error = %err, "session D-Bus unavailable; desktop notifications disabled");
+            None
+        }
+    };
 
     let initial_mac = (!config.device.mac_address.trim().is_empty())
         .then(|| config.device.mac_address.clone());
@@ -1392,8 +1398,11 @@ async fn main() -> Result<()> {
     );
     let mut bt_resume_rx_opt = Some(bt_resume_rx);
 
-    let compositor: Arc<dyn CompositorBackend> = Arc::new(HyprlandBackend::new());
-    let mut local_clipboard_rx_opt = Some(WaylandClipboardDriver::spawn_watcher());
+    let compositor: Arc<dyn CompositorBackend> = Arc::new(LinuxDesktopBackend::new());
+    info!(backend = compositor.name(), "initialized desktop backend");
+    let mut local_clipboard_rx_opt = Some(compositor.watch_clipboard());
+    let mut clipboard_retry_sleep: Option<Pin<Box<Sleep>>> = None;
+    let mut clipboard_retry_attempts: u32 = 0;
 
     let (files, files_task) = files::spawn_files_manager(
         default_files_socket_path(),
@@ -1488,6 +1497,13 @@ async fn main() -> Result<()> {
             match local_clipboard_rx_opt.as_mut() {
                 Some(rx) => rx.recv().await,
                 None => std::future::pending::<Option<ClipboardEvent>>().await,
+            }
+        };
+
+        let clipboard_retry_fut = async {
+            match clipboard_retry_sleep.as_mut() {
+                Some(sleep) => sleep.as_mut().await,
+                None => std::future::pending::<()>().await,
             }
         };
 
@@ -1627,15 +1643,47 @@ async fn main() -> Result<()> {
             maybe_local_clip = local_clip_fut => {
                 match maybe_local_clip {
                     Some(ev) => {
+                        if clipboard_retry_attempts > 0 {
+                            info!(backend = runtime.compositor.name(), "desktop clipboard watcher reconnected");
+                            clipboard_retry_attempts = 0;
+                        }
                         if let Some(session) = runtime.active_session.as_ref() {
                             let _ = session.local_clip_tx.try_send(ev);
                         }
                     }
                     None => {
-                        warn!("Wayland clipboard watcher exited; local clipboard capture disabled");
                         local_clipboard_rx_opt = None;
+                        clipboard_retry_attempts = clipboard_retry_attempts.saturating_add(1);
+                        let delay_secs = match clipboard_retry_attempts {
+                            1 => 3,
+                            2 => 5,
+                            3 => 10,
+                            4 => 15,
+                            _ => 30,
+                        };
+                        if clipboard_retry_attempts == 1 {
+                            warn!(
+                                backend = runtime.compositor.name(),
+                                delay_secs,
+                                "desktop clipboard watcher exited; scheduling reconnect"
+                            );
+                        } else {
+                            debug!(
+                                backend = runtime.compositor.name(),
+                                attempt = clipboard_retry_attempts,
+                                delay_secs,
+                                "desktop clipboard watcher unavailable; retrying"
+                            );
+                        }
+                        clipboard_retry_sleep =
+                            Some(Box::pin(tokio::time::sleep(Duration::from_secs(delay_secs))));
                     }
                 }
+            }
+
+            _ = clipboard_retry_fut => {
+                clipboard_retry_sleep = None;
+                local_clipboard_rx_opt = Some(runtime.compositor.watch_clipboard());
             }
 
             res = hid_changed_fut => {

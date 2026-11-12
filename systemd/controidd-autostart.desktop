@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Controid Daemon
+Comment=Servicio en segundo plano de Controid (Android - Linux)
+Exec=controidd
+Icon=controid
+Terminal=false
+NoDisplay=true
+Categories=Utility;Network;
+X-GNOME-Autostart-enabled=true

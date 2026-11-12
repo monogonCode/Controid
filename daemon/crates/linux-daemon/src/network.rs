@@ -1,9 +1,12 @@
 use anyhow::{Context, Result, anyhow, bail};
 use futures::StreamExt;
 use std::collections::HashMap;
+use std::net::Ipv4Addr;
+use std::path::Path;
 use std::time::Duration;
+use tokio::process::Command;
 use tokio::time::Instant;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use zbus::message::Type as MessageType;
 use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
 use zbus::{MatchRule, MessageStream};
@@ -150,81 +153,114 @@ async fn wifi_device_active_on_ssid(
     false
 }
 
+pub async fn is_nm_available(conn: &zbus::Connection) -> bool {
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        conn.call_method(
+            Some("org.freedesktop.DBus"),
+            "/org/freedesktop/DBus",
+            Some("org.freedesktop.DBus"),
+            "NameHasOwner",
+            &(NM_SERVICE,),
+        ),
+    )
+    .await
+    .ok()
+    .and_then(|r| r.ok())
+    .and_then(|reply| reply.body().deserialize::<bool>().ok())
+    .unwrap_or(false)
+}
+
 pub async fn is_ssid_active(conn: &zbus::Connection, ssid: &str) -> Result<bool> {
     if ssid.is_empty() {
         return Ok(false);
     }
-    let ssid_bytes = ssid.as_bytes();
-    for dev in get_devices(conn).await? {
-        let Ok(dev_type) = get_prop::<u32>(conn, dev.as_str(), NM_DEVICE_IFACE, "DeviceType").await
-        else {
-            continue;
-        };
-        if dev_type == NM_DEVICE_TYPE_WIFI
-            && wifi_device_active_on_ssid(conn, dev.as_str(), ssid_bytes).await
-        {
-            return Ok(true);
+    if is_nm_available(conn).await {
+        let ssid_bytes = ssid.as_bytes();
+        for dev in get_devices(conn).await? {
+            let Ok(dev_type) = get_prop::<u32>(conn, dev.as_str(), NM_DEVICE_IFACE, "DeviceType").await
+            else {
+                continue;
+            };
+            if dev_type == NM_DEVICE_TYPE_WIFI
+                && wifi_device_active_on_ssid(conn, dev.as_str(), ssid_bytes).await
+            {
+                return Ok(true);
+            }
         }
+        return Ok(false);
     }
-    Ok(false)
+
+    Ok(fallback_is_ssid_active(ssid).await)
 }
 
 pub async fn get_active_wifi_gateway(conn: &zbus::Connection, ssid: &str) -> Result<Option<String>> {
-    let ssid_bytes = ssid.trim().as_bytes();
-    for dev in get_devices(conn).await? {
-        let Ok(dev_type) = get_prop::<u32>(conn, dev.as_str(), NM_DEVICE_IFACE, "DeviceType").await
-        else {
-            continue;
-        };
-        if dev_type != NM_DEVICE_TYPE_WIFI {
-            continue;
-        }
-        let Ok(state) = get_prop::<u32>(conn, dev.as_str(), NM_DEVICE_IFACE, "State").await else {
-            continue;
-        };
-        if state != NM_DEVICE_STATE_ACTIVATED {
-            continue;
-        }
-        if !ssid_bytes.is_empty() && !wifi_device_active_on_ssid(conn, dev.as_str(), ssid_bytes).await {
-            continue;
-        }
-        let Ok(ip4_path) =
-            get_prop::<OwnedObjectPath>(conn, dev.as_str(), NM_DEVICE_IFACE, "Ip4Config").await
-        else {
-            continue;
-        };
-        if ip4_path.as_str() == "/" {
-            continue;
-        }
-        if let Ok(gw) =
-            get_prop::<String>(conn, ip4_path.as_str(), NM_IP4_CONFIG_IFACE, "Gateway").await
-        {
-            let trimmed = gw.trim();
-            if !trimmed.is_empty() {
-                return Ok(Some(trimmed.to_string()));
-            }
-        }
-        if let Ok(routes) = get_prop::<Vec<HashMap<String, OwnedValue>>>(
-            conn,
-            ip4_path.as_str(),
-            NM_IP4_CONFIG_IFACE,
-            "RouteData",
-        )
-        .await
-        {
-            for route in routes {
-                if let Some(nh) = route
-                    .get("next-hop")
-                    .and_then(|v| <&str>::try_from(v).ok())
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
+    if is_nm_available(conn).await {
+        let ssid_bytes = ssid.trim().as_bytes();
+        if let Ok(devices) = get_devices(conn).await {
+            for dev in devices {
+                let Ok(dev_type) =
+                    get_prop::<u32>(conn, dev.as_str(), NM_DEVICE_IFACE, "DeviceType").await
+                else {
+                    continue;
+                };
+                if dev_type != NM_DEVICE_TYPE_WIFI {
+                    continue;
+                }
+                let Ok(state) = get_prop::<u32>(conn, dev.as_str(), NM_DEVICE_IFACE, "State").await
+                else {
+                    continue;
+                };
+                if state != NM_DEVICE_STATE_ACTIVATED {
+                    continue;
+                }
+                if !ssid_bytes.is_empty()
+                    && !wifi_device_active_on_ssid(conn, dev.as_str(), ssid_bytes).await
                 {
-                    return Ok(Some(nh.to_string()));
+                    continue;
+                }
+                let Ok(ip4_path) =
+                    get_prop::<OwnedObjectPath>(conn, dev.as_str(), NM_DEVICE_IFACE, "Ip4Config")
+                        .await
+                else {
+                    continue;
+                };
+                if ip4_path.as_str() == "/" {
+                    continue;
+                }
+                if let Ok(gw) =
+                    get_prop::<String>(conn, ip4_path.as_str(), NM_IP4_CONFIG_IFACE, "Gateway")
+                        .await
+                {
+                    let trimmed = gw.trim();
+                    if !trimmed.is_empty() {
+                        return Ok(Some(trimmed.to_string()));
+                    }
+                }
+                if let Ok(routes) = get_prop::<Vec<HashMap<String, OwnedValue>>>(
+                    conn,
+                    ip4_path.as_str(),
+                    NM_IP4_CONFIG_IFACE,
+                    "RouteData",
+                )
+                .await
+                {
+                    for route in routes {
+                        if let Some(nh) = route
+                            .get("next-hop")
+                            .and_then(|v| <&str>::try_from(v).ok())
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                        {
+                            return Ok(Some(nh.to_string()));
+                        }
+                    }
                 }
             }
         }
     }
-    Ok(None)
+
+    Ok(read_proc_net_route_gateway())
 }
 
 async fn find_saved_connection(conn: &zbus::Connection, ssid: &str) -> Result<OwnedObjectPath> {
@@ -430,6 +466,34 @@ pub async fn connect_hotspot_ssid(
         bail!("hotspot SSID is empty; configure device.hotspot_ssid first");
     }
 
+    if is_nm_available(conn).await {
+        return connect_hotspot_ssid_nm(conn, ssid, timeout_secs).await;
+    }
+
+    warn!(
+        ssid,
+        "NetworkManager D-Bus service unavailable; trying iwd/manual Wi-Fi fallback"
+    );
+    if fallback_is_ssid_active(ssid).await {
+        info!(ssid, "already connected to target hotspot SSID via non-NM stack");
+        return Ok(());
+    }
+
+    if let Some(dev) = find_iwd_station_device().await {
+        return connect_hotspot_ssid_iwd(&dev, ssid, timeout_secs).await;
+    }
+
+    bail!(
+        "NetworkManager is not running and iwd (iwctl) was not found; connect Wi-Fi manually to '{ssid}' or set connection_mode = 'lan' with direct_host"
+    );
+}
+
+async fn connect_hotspot_ssid_nm(
+    conn: &zbus::Connection,
+    ssid: &str,
+    timeout_secs: u64,
+) -> Result<()> {
+
     let deadline = Instant::now() + Duration::from_secs(timeout_secs.max(1));
     let ssid_bytes = ssid.as_bytes();
 
@@ -515,5 +579,255 @@ pub async fn connect_hotspot_ssid(
         } else {
             tokio::time::sleep(wait_step).await;
         }
+    }
+}
+
+fn strip_ansi(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            if chars.peek() == Some(&'[') {
+                let _ = chars.next();
+                for ch in chars.by_ref() {
+                    if ('@'..='~').contains(&ch) {
+                        break;
+                    }
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+async fn run_quiet_cmd(program: &str, args: &[&str], timeout_dur: Duration) -> Option<String> {
+    let fut = Command::new(program).args(args).output();
+    let out = tokio::time::timeout(timeout_dur, fut).await.ok()?.ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(strip_ansi(&String::from_utf8_lossy(&out.stdout)))
+}
+
+fn list_wireless_ifaces() -> Vec<String> {
+    let mut ifaces = Vec::new();
+    let Ok(rd) = std::fs::read_dir("/sys/class/net") else {
+        return ifaces;
+    };
+    for entry in rd.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if entry.path().join("wireless").exists() || entry.path().join("phy80211").exists() {
+            ifaces.push(name);
+        }
+    }
+    ifaces.sort();
+    ifaces
+}
+
+fn parse_iwd_connected_ssid(station_show: &str) -> Option<String> {
+    let mut connected = false;
+    let mut network: Option<String> = None;
+    for raw in station_show.lines() {
+        let line = raw.trim();
+        if let Some(rest) = line.strip_prefix("State") {
+            let state = rest.trim();
+            connected = state.eq_ignore_ascii_case("connected");
+        } else if let Some(rest) = line.strip_prefix("Connected network") {
+            let name = rest.trim();
+            if !name.is_empty() {
+                network = Some(name.to_owned());
+            }
+        }
+    }
+    if connected { network } else { None }
+}
+
+fn parse_iwd_station_device(device_list: &str) -> Option<String> {
+    for raw in device_list.lines() {
+        let line = raw.trim();
+        if line.is_empty()
+            || line.starts_with("Devices")
+            || line.starts_with('-')
+            || line.starts_with("Name")
+        {
+            continue;
+        }
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        if cols.len() >= 3
+            && cols.contains(&"station")
+            && cols.contains(&"on")
+        {
+            return Some(cols[0].to_owned());
+        }
+    }
+    None
+}
+
+async fn find_iwd_station_device() -> Option<String> {
+    if let Some(out) = run_quiet_cmd("iwctl", &["device", "list"], Duration::from_secs(2)).await
+        && let Some(dev) = parse_iwd_station_device(&out)
+    {
+        return Some(dev);
+    }
+    for iface in list_wireless_ifaces() {
+        if run_quiet_cmd("iwctl", &["station", &iface, "show"], Duration::from_secs(2))
+            .await
+            .is_some()
+        {
+            return Some(iface);
+        }
+    }
+    None
+}
+
+async fn fallback_is_ssid_active(ssid: &str) -> bool {
+    if let Some(out) = run_quiet_cmd("iwgetid", &["-r"], Duration::from_secs(2)).await
+        && out.lines().any(|line| line.trim() == ssid)
+    {
+        return true;
+    }
+
+    for iface in list_wireless_ifaces() {
+        if let Some(out) =
+            run_quiet_cmd("iwctl", &["station", &iface, "show"], Duration::from_secs(2)).await
+            && parse_iwd_connected_ssid(&out).as_deref() == Some(ssid)
+        {
+            return true;
+        }
+        if let Some(out) =
+            run_quiet_cmd("iw", &["dev", &iface, "link"], Duration::from_secs(2)).await
+            && out.lines().any(|line| {
+                line.trim()
+                    .strip_prefix("SSID:")
+                    .is_some_and(|s| s.trim() == ssid)
+            })
+        {
+            return true;
+        }
+    }
+
+    false
+}
+
+async fn connect_hotspot_ssid_iwd(dev: &str, ssid: &str, timeout_secs: u64) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs.max(1));
+    let _ = run_quiet_cmd("iwctl", &["station", dev, "scan"], Duration::from_secs(4)).await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+
+    info!(device = dev, ssid, "connecting to hotspot Wi-Fi via iwd (iwctl)");
+    let connect_out = tokio::time::timeout(
+        Duration::from_secs(10),
+        Command::new("iwctl")
+            .args(["station", dev, "connect", ssid])
+            .output(),
+    )
+    .await
+    .context("iwctl station connect timed out")?
+    .context("failed to execute iwctl")?;
+
+    if !connect_out.status.success() {
+        let stderr = strip_ansi(&String::from_utf8_lossy(&connect_out.stderr));
+        let stdout = strip_ansi(&String::from_utf8_lossy(&connect_out.stdout));
+        let msg = if !stderr.trim().is_empty() {
+            stderr.trim().to_owned()
+        } else {
+            stdout.trim().to_owned()
+        };
+        bail!("iwctl connect to '{ssid}' failed: {msg}");
+    }
+
+    loop {
+        if let Some(show) =
+            run_quiet_cmd("iwctl", &["station", dev, "show"], Duration::from_secs(2)).await
+            && parse_iwd_connected_ssid(&show).as_deref() == Some(ssid)
+        {
+            info!(device = dev, ssid, "iwd Wi-Fi hotspot connection activated");
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            bail!("timed out waiting for iwd Wi-Fi activation of '{ssid}'");
+        }
+        tokio::time::sleep(Duration::from_millis(400)).await;
+    }
+}
+
+fn parse_proc_net_route_gateway(content: &str, is_wireless: impl Fn(&str) -> bool) -> Option<String> {
+    let mut fallback_gw: Option<String> = None;
+
+    for line in content.lines().skip(1) {
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        if cols.len() < 8 {
+            continue;
+        }
+        let iface = cols[0];
+        if iface == "lo" {
+            continue;
+        }
+        let dest = cols[1];
+        let gw_hex = cols[2];
+        let Ok(flags) = u32::from_str_radix(cols[3], 16) else {
+            continue;
+        };
+        // RTF_UP (0x1) | RTF_GATEWAY (0x2)
+        if dest != "00000000" || (flags & 0x3) != 0x3 {
+            continue;
+        }
+        let Ok(raw_ne) = u32::from_str_radix(gw_hex, 16) else {
+            continue;
+        };
+        if raw_ne == 0 {
+            continue;
+        }
+        let ip = Ipv4Addr::from(raw_ne.to_ne_bytes());
+        if is_wireless(iface) {
+            return Some(ip.to_string());
+        }
+        if fallback_gw.is_none() {
+            fallback_gw = Some(ip.to_string());
+        }
+    }
+
+    fallback_gw
+}
+
+fn read_proc_net_route_gateway() -> Option<String> {
+    let content = std::fs::read_to_string("/proc/net/route").ok()?;
+    parse_proc_net_route_gateway(&content, |iface| {
+        Path::new("/sys/class/net").join(iface).join("wireless").exists()
+            || Path::new("/sys/class/net").join(iface).join("phy80211").exists()
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_iwd_outputs_and_strips_ansi() {
+        let dev_list = "\x1b[0mDevices in Station Mode\n-------------------------\n  Name       Address           Powered   Adapter   Mode\n  wlan0      aa:bb:cc:dd:ee:ff on        phy0      station\n";
+        assert_eq!(parse_iwd_station_device(dev_list).as_deref(), Some("wlan0"));
+
+        let station_show = "                                 Station: wlan0\n--------------------------------------------------------------------------------\n  Settable  Property              Value\n            Scanning              no\n            State                 connected\n            Connected network     MyPhoneAP\n";
+        assert_eq!(
+            parse_iwd_connected_ssid(station_show).as_deref(),
+            Some("MyPhoneAP")
+        );
+    }
+
+    #[test]
+    fn parses_proc_net_route_default_gateway_preferring_wireless() {
+        let route_table = "\
+Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT
+eth0\t00000000\t0101A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0
+wlan0\t00000000\t012BA8C0\t0003\t0\t0\t600\t00000000\t0\t0\t0
+";
+        // 0x012BA8C0 in little-endian u32 -> bytes [C0, A8, 2B, 01] = 192.168.43.1
+        let gw = parse_proc_net_route_gateway(route_table, |iface| iface == "wlan0");
+        assert_eq!(gw.as_deref(), Some("192.168.43.1"));
+
+        let wired_only = parse_proc_net_route_gateway(route_table, |_| false);
+        assert_eq!(wired_only.as_deref(), Some("192.168.1.1"));
     }
 }

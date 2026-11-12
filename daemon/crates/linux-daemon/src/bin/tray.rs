@@ -4,6 +4,7 @@ use linux_daemon::{config::AppConfig, ipc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::fs;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
@@ -61,6 +62,7 @@ struct ControidTray {
     stream_active: bool,
     files_mounted: bool,
     last_error: Option<String>,
+    warned_no_watcher: AtomicBool,
     cmd_tx: mpsc::UnboundedSender<TrayCommand>,
 }
 
@@ -77,6 +79,7 @@ impl ControidTray {
             stream_active: false,
             files_mounted: false,
             last_error: None,
+            warned_no_watcher: AtomicBool::new(false),
             cmd_tx,
         }
     }
@@ -224,11 +227,28 @@ impl ksni::Tray for ControidTray {
     fn watcher_offline(&self, reason: ksni::OfflineReason) -> bool {
         match reason {
             ksni::OfflineReason::No => {
-                warn!("StatusNotifierWatcher went offline; waiting for watcher return");
+                if !self.warned_no_watcher.swap(true, Ordering::Relaxed) {
+                    warn!("StatusNotifierWatcher unavailable/offline; tray waiting passively");
+                }
+                true
+            }
+            ksni::OfflineReason::Error(ksni::Error::Watcher(err)) => {
+                if !self.warned_no_watcher.swap(true, Ordering::Relaxed) {
+                    warn!(
+                        error = %err,
+                        "StatusNotifierWatcher not active (desktop lacks tray/AppIndicator); continuing passively without blocking"
+                    );
+                }
+                true
+            }
+            ksni::OfflineReason::Error(ksni::Error::WontShow) => {
+                if !self.warned_no_watcher.swap(true, Ordering::Relaxed) {
+                    info!("StatusNotifierHost not ready yet; tray waiting passively");
+                }
                 true
             }
             ksni::OfflineReason::Error(err) => {
-                warn!(error = %err, "StatusNotifierWatcher error; shutting down tray");
+                warn!(error = %err, "StatusNotifierWatcher D-Bus error; shutting down tray");
                 false
             }
             _ => false,
@@ -601,20 +621,25 @@ async fn main() -> Result<()> {
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
     let tray = ControidTray::new(cmd_tx);
 
-    let handle = match tray.spawn().await {
+    let handle = match tray.assume_sni_available(true).spawn().await {
         Ok(h) => h,
         Err(err) => {
-            warn!(error = %err, "StatusNotifierWatcher unavailable; exiting tray cleanly");
+            warn!(error = %err, "session D-Bus / tray service unavailable; exiting tray cleanly");
             return Ok(());
         }
     };
     info!("Controid StatusNotifierItem tray started");
 
     let telemetry_task = tokio::spawn(run_telemetry_loop(handle.clone()));
+    let mut sigterm =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
 
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
+                break;
+            }
+            _ = sigterm.recv() => {
                 break;
             }
             maybe_cmd = cmd_rx.recv() => {

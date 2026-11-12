@@ -50,8 +50,12 @@ def xdg_config_home() -> Path:
     return Path(os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config"))
 
 
+def xdg_state_home() -> Path:
+    return Path(os.environ.get("XDG_STATE_HOME") or (Path.home() / ".local" / "state"))
+
+
 def xdg_runtime_dir() -> Path:
-    return Path(os.environ.get("XDG_RUNTIME_DIR") or f"/tmp")
+    return Path(os.environ.get("XDG_RUNTIME_DIR") or "/tmp")
 
 
 def config_path() -> Path:
@@ -60,6 +64,39 @@ def config_path() -> Path:
 
 def socket_path() -> Path:
     return xdg_runtime_dir() / "controid" / "daemon.sock"
+
+
+def daemon_log_path() -> Path:
+    return xdg_state_home() / "controid" / "controidd.log"
+
+
+def autostart_desktop_path() -> Path:
+    return xdg_config_home() / "autostart" / "controidd.desktop"
+
+
+def resolve_controid_bin(tool: str) -> str | None:
+    found = shutil.which(tool)
+    if found:
+        return found
+    candidate = Path.home() / ".local" / "bin" / tool
+    if candidate.is_file() and os.access(candidate, os.X_OK):
+        return str(candidate)
+    return None
+
+
+def detect_session_kind() -> str:
+    if os.environ.get("WAYLAND_DISPLAY"):
+        return "wayland"
+    if os.environ.get("DISPLAY"):
+        return "x11"
+    return "headless"
+
+
+def has_systemd_user() -> bool:
+    if not Path("/run/systemd/system").is_dir() or not shutil.which("systemctl"):
+        return False
+    rc, _, _ = run_cmd(["systemctl", "--user", "show-environment"], timeout=1.5)
+    return rc == 0
 
 
 def default_config() -> dict[str, Any]:
@@ -258,18 +295,38 @@ def get_paired_bt_devices() -> list[dict[str, Any]]:
     return devices
 
 
+def _strip_ansi(text: str) -> str:
+    return re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", text)
+
+
 def get_saved_wifi_ssids() -> list[str]:
-    rc, out, _ = run_cmd(
-        ["nmcli", "-t", "-f", "NAME,TYPE", "connection", "show"],
-        timeout=3.0,
-    )
-    if rc != 0 or not out:
-        return []
     ssids: list[str] = []
-    for line in out.splitlines():
-        parts = line.rsplit(":", 1)
-        if len(parts) == 2 and parts[1] == "802-11-wireless" and parts[0]:
-            ssids.append(parts[0])
+    if shutil.which("nmcli"):
+        rc, out, _ = run_cmd(
+            ["nmcli", "-t", "-f", "NAME,TYPE", "connection", "show"],
+            timeout=3.0,
+        )
+        if rc == 0 and out:
+            for line in out.splitlines():
+                parts = line.rsplit(":", 1)
+                if len(parts) == 2 and parts[1] == "802-11-wireless" and parts[0]:
+                    ssids.append(parts[0])
+    if not ssids and shutil.which("iwctl"):
+        rc, out, _ = run_cmd(["iwctl", "known-networks", "list"], timeout=3.0)
+        if rc == 0 and out:
+            for raw in _strip_ansi(out).splitlines():
+                line = raw.strip()
+                if (
+                    not line
+                    or line.startswith("Known")
+                    or line.startswith("-")
+                    or line.startswith("Name")
+                ):
+                    continue
+                # Split on 2+ spaces to preserve SSIDs containing single spaces
+                cols = re.split(r"\s{2,}", line)
+                if cols and cols[0]:
+                    ssids.append(cols[0].strip())
     return sorted(set(ssids), key=str.casefold)
 
 
@@ -303,15 +360,28 @@ def detect_adb_phone_lan_ip() -> tuple[str | None, str]:
 def collect_diagnostics() -> tuple[list[tuple[str, str, bool]], str | None]:
     checks: list[tuple[str, str, bool]] = []
     sock_exists = socket_path().exists()
-    rc_srv, srv_out, _ = run_cmd(["systemctl", "--user", "is-active", SERVICE_NAME], timeout=3.0)
-    rc_ena, ena_out, _ = run_cmd(["systemctl", "--user", "is-enabled", SERVICE_NAME], timeout=3.0)
-    checks.append(
-        (
-            "Servicio systemd usuario (controid.service)",
-            f"estado={srv_out or 'inactivo'} | arranque={ena_out or 'deshabilitado'}",
-            rc_srv == 0,
+    systemd_user = has_systemd_user()
+    if systemd_user:
+        rc_srv, srv_out, _ = run_cmd(["systemctl", "--user", "is-active", SERVICE_NAME], timeout=3.0)
+        rc_ena, ena_out, _ = run_cmd(["systemctl", "--user", "is-enabled", SERVICE_NAME], timeout=3.0)
+        checks.append(
+            (
+                "Servicio systemd usuario (controid.service)",
+                f"estado={srv_out or 'inactivo'} | arranque={ena_out or 'deshabilitado'}",
+                rc_srv == 0,
+            )
         )
-    )
+    else:
+        rc_pg, _, _ = run_cmd(["pgrep", "-x", "controidd"], timeout=2.0)
+        autostart_on = autostart_desktop_path().is_file()
+        daemon_up = rc_pg == 0 or sock_exists
+        checks.append(
+            (
+                "Demonio local controidd (sin systemd)",
+                f"proceso={'activo' if daemon_up else 'detenido'} | autostart XDG={'habilitado' if autostart_on else 'deshabilitado'}",
+                daemon_up,
+            )
+        )
     checks.append(
         (
             "Socket IPC local",
@@ -320,25 +390,57 @@ def collect_diagnostics() -> tuple[list[tuple[str, str, bool]], str | None]:
         )
     )
 
-    rc_bt, bt_out, _ = run_cmd(["systemctl", "is-active", "bluetooth.service"], timeout=3.0)
     paired_bt = get_paired_bt_devices()
+    if Path("/run/systemd/system").is_dir() and shutil.which("systemctl"):
+        rc_bt, bt_out, _ = run_cmd(["systemctl", "is-active", "bluetooth.service"], timeout=3.0)
+        bt_ok = rc_bt == 0
+        bt_state = bt_out or "inactivo"
+    else:
+        rc_bt, _, _ = run_cmd(["pgrep", "-x", "bluetoothd"], timeout=2.0)
+        bt_ok = rc_bt == 0
+        bt_state = "activo (bluetoothd)" if bt_ok else "inactivo"
     checks.append(
         (
-            "Bluetooth (bluetooth.service)",
-            f"servicio={bt_out or 'inactivo'} | dispositivos emparejados={len(paired_bt)}",
-            rc_bt == 0,
+            "Bluetooth (BlueZ)",
+            f"servicio={bt_state} | dispositivos emparejados={len(paired_bt)}",
+            bt_ok,
         )
     )
 
-    rc_nm, nm_out, _ = run_cmd(["systemctl", "is-active", "NetworkManager.service"], timeout=3.0)
     ssids = get_saved_wifi_ssids()
-    checks.append(
-        (
-            "NetworkManager",
-            f"servicio={nm_out or 'inactivo'} | perfiles Wi-Fi={len(ssids)}",
-            rc_nm == 0,
+    nm_running = False
+    if Path("/run/systemd/system").is_dir() and shutil.which("systemctl"):
+        rc_nm, _, _ = run_cmd(["systemctl", "is-active", "NetworkManager.service"], timeout=3.0)
+        nm_running = rc_nm == 0
+    if not nm_running and shutil.which("nmcli"):
+        rc_nm2, _, _ = run_cmd(["nmcli", "-t", "general", "status"], timeout=2.5)
+        nm_running = rc_nm2 == 0
+    if nm_running:
+        checks.append(
+            (
+                "Red Wi-Fi (NetworkManager)",
+                f"activo | perfiles Wi-Fi={len(ssids)}",
+                True,
+            )
         )
-    )
+    else:
+        rc_iwd, _, _ = run_cmd(["pgrep", "-x", "iwd"], timeout=2.0)
+        if rc_iwd == 0:
+            checks.append(
+                (
+                    "Red Wi-Fi (iwd / iwctl)",
+                    f"iwd activo | redes conocidas={len(ssids)}",
+                    True,
+                )
+            )
+        else:
+            checks.append(
+                (
+                    "Gestor Wi-Fi (modo directo LAN disponible)",
+                    "Sin NetworkManager ni iwd activos; el modo Wi-Fi hotspot automático requiere NM/iwd (LAN directa operativa)",
+                    True,
+                )
+            )
 
     uinput = Path("/dev/uinput")
     uinput_rw = uinput.exists() and os.access(uinput, os.W_OK)
@@ -350,19 +452,30 @@ def collect_diagnostics() -> tuple[list[tuple[str, str, bool]], str | None]:
         )
     )
 
+    session = detect_session_kind()
+    clip_tools: list[str] = []
+    if shutil.which("wl-paste"):
+        clip_tools.append("wl-paste")
+    if shutil.which("xclip"):
+        clip_tools.append("xclip")
+    if shutil.which("xsel"):
+        clip_tools.append("xsel")
+    checks.append(
+        (
+            f"Sesión gráfica ({session}) y portapapeles",
+            f"herramientas CLI: {', '.join(clip_tools) if clip_tools else 'solo GTK4/nativo del demonio'}",
+            session != "headless",
+        )
+    )
+
     for tool, label in (
         ("controid-viewer", "Visor interactivo (controid-viewer)"),
         ("controid-mount", "Servidor FUSE local (controid-mount)"),
         ("fusermount3", "Montaje FUSE3 (fusermount3)"),
         ("mpv", "Visor fallback (mpv)"),
-        ("wl-paste", "Portapapeles Wayland (wl-paste)"),
         ("controid", "CLI controid"),
     ):
-        found = shutil.which(tool)
-        if found is None and tool.startswith("controid"):
-            candidate = Path.home() / ".local" / "bin" / tool
-            if candidate.is_file() and os.access(candidate, os.X_OK):
-                found = str(candidate)
+        found = resolve_controid_bin(tool)
         checks.append((label, found or "No encontrado en PATH", found is not None))
 
     detected_ip: str | None = None
@@ -653,8 +766,8 @@ class ControidWindow(Adw.ApplicationWindow):
         files_group.add(self.row_files)
         page.add(files_group)
 
-        # Systemd service group
-        sys_group = Adw.PreferencesGroup(title="Servicio en segundo plano (systemd)")
+        # Background daemon / systemd service group
+        sys_group = Adw.PreferencesGroup(title="Servicio en segundo plano")
         sys_buttons: list[Gtk.Widget] = []
         for label, action in (
             ("Iniciar", "start"),
@@ -666,7 +779,7 @@ class ControidWindow(Adw.ApplicationWindow):
             btn.connect("clicked", lambda _b, a=action: self._run_systemd_action(a))
             sys_buttons.append(btn)
         self.row_systemd = self._make_control_row(
-            "controid.service",
+            "controid.service" if has_systemd_user() else "controidd",
             "Consultando estado…",
             sys_buttons,
         )
@@ -676,7 +789,7 @@ class ControidWindow(Adw.ApplicationWindow):
         tray_btn.connect("clicked", lambda _b: self._launch_tray())
         self.row_tray = self._make_control_row(
             "Icono en bandeja del sistema (controid-tray)",
-            "Permite acceso rápido desde Waybar / bandeja Wayland",
+            "Permite acceso rápido desde Waybar, KDE, XFCE u otras bandejas SNI",
             [tray_btn],
         )
         sys_group.add(self.row_tray)
@@ -877,7 +990,7 @@ class ControidWindow(Adw.ApplicationWindow):
 
         health_group = Adw.PreferencesGroup(
             title="Salud del sistema y dependencias",
-            description="Comprobación rápida de BlueZ, NetworkManager, FUSE3, visores y ADB",
+            description="Comprobación rápida de BlueZ, red (NetworkManager/iwd), sesión, FUSE3, visores y ADB",
         )
         btn_open_apk = Gtk.Button(label="Abrir app en móvil (ADB)")
         btn_open_apk.connect("clicked", lambda _b: self._launch_android_app_adb())
@@ -898,8 +1011,8 @@ class ControidWindow(Adw.ApplicationWindow):
         page.add(health_group)
 
         logs_group = Adw.PreferencesGroup(
-            title="Registro de eventos y servicio (journalctl)",
-            description="Eventos IPC en vivo y últimas líneas de controid.service",
+            title="Registro de eventos y servicio",
+            description="Eventos IPC en vivo y últimas líneas de controidd / journalctl",
         )
         lbox = Gtk.Box(spacing=6)
         btn_refresh_logs = Gtk.Button(label="Actualizar logs")
@@ -1180,34 +1293,96 @@ class ControidWindow(Adw.ApplicationWindow):
     # ------------------------------------------------------------------ Clipboard
 
     def _paste_local_clipboard(self) -> None:
-        def worker() -> None:
-            rc_types, types_out, _ = run_cmd(["wl-paste", "--list-types"], timeout=2.0)
-            offered = [line.strip() for line in types_out.splitlines() if line.strip()] if rc_types == 0 else []
-            text_mimes = (
-                "text/plain;charset=utf-8",
-                "text/plain",
-                "UTF8_STRING",
-                "STRING",
-                "TEXT",
-            )
-            chosen_text_mime = next((m for m in text_mimes if m in offered), None)
-            if chosen_text_mime:
-                rc, out, _ = run_cmd(["wl-paste", "--type", chosen_text_mime, "--no-newline"], timeout=2.0)
-                if rc == 0 and out:
-                    GLib.idle_add(lambda o=out: self.clip_text_view.get_buffer().set_text(o) or False)
-                    return
-            if any(m.startswith("image/") for m in offered):
-                GLib.idle_add(
-                    lambda: self._toast("El portapapeles contiene una imagen (se sincroniza automáticamente al copiar)")
-                    or False
-                )
+        text_mimes = (
+            "text/plain;charset=utf-8",
+            "text/plain",
+            "UTF8_STRING",
+            "STRING",
+            "TEXT",
+        )
+
+        def read_via_gdk_fallback() -> None:
+            disp = Gdk.Display.get_default()
+            if not disp:
+                self._toast("No hay texto disponible en el portapapeles")
                 return
-            if not offered:
-                rc, out, _ = run_cmd(["wl-paste", "--no-newline"], timeout=2.0)
-                if rc == 0 and out:
-                    GLib.idle_add(lambda o=out: self.clip_text_view.get_buffer().set_text(o) or False)
+            clip = disp.get_clipboard()
+            formats = clip.get_formats()
+            mime_types = formats.get_mime_types() if formats else []
+            if any(m.startswith("image/") for m in mime_types) and not any(
+                m in text_mimes or m.startswith("text/") for m in mime_types
+            ):
+                self._toast("El portapapeles contiene una imagen (se sincroniza automáticamente al copiar)")
+                return
+
+            def on_read(src: Gdk.Clipboard, res: Gio.AsyncResult) -> None:
+                try:
+                    text = src.read_text_finish(res)
+                except Exception:
+                    text = None
+                if text:
+                    self.clip_text_view.get_buffer().set_text(text)
+                else:
+                    self._toast("No hay texto disponible en el portapapeles")
+
+            clip.read_text_async(None, on_read)
+
+        def worker() -> None:
+            session = detect_session_kind()
+            if session == "wayland" and shutil.which("wl-paste"):
+                rc_types, types_out, _ = run_cmd(["wl-paste", "--list-types"], timeout=2.0)
+                offered = [line.strip() for line in types_out.splitlines() if line.strip()] if rc_types == 0 else []
+                chosen_text_mime = next((m for m in text_mimes if m in offered), None)
+                if chosen_text_mime:
+                    rc, out, _ = run_cmd(["wl-paste", "--type", chosen_text_mime, "--no-newline"], timeout=2.0)
+                    if rc == 0 and out:
+                        GLib.idle_add(lambda o=out: self.clip_text_view.get_buffer().set_text(o) or False)
+                        return
+                if any(m.startswith("image/") for m in offered):
+                    GLib.idle_add(
+                        lambda: self._toast("El portapapeles contiene una imagen (se sincroniza automáticamente al copiar)")
+                        or False
+                    )
                     return
-            GLib.idle_add(lambda: self._toast("No hay texto disponible en wl-paste") or False)
+                if not offered:
+                    rc, out, _ = run_cmd(["wl-paste", "--no-newline"], timeout=2.0)
+                    if rc == 0 and out:
+                        GLib.idle_add(lambda o=out: self.clip_text_view.get_buffer().set_text(o) or False)
+                        return
+
+            if os.environ.get("DISPLAY"):
+                if shutil.which("xclip"):
+                    rc_t, t_out, _ = run_cmd(
+                        ["xclip", "-o", "-selection", "clipboard", "-t", "TARGETS"],
+                        timeout=2.0,
+                    )
+                    offered_x = [l.strip() for l in t_out.splitlines() if l.strip()] if rc_t == 0 else []
+                    chosen_x = next((m for m in text_mimes if m in offered_x), None)
+                    if chosen_x:
+                        rc_x, x_out, _ = run_cmd(
+                            ["xclip", "-o", "-selection", "clipboard", "-t", chosen_x],
+                            timeout=2.0,
+                        )
+                        if rc_x == 0 and x_out:
+                            GLib.idle_add(lambda o=x_out: self.clip_text_view.get_buffer().set_text(o) or False)
+                            return
+                    if any(m.startswith("image/") for m in offered_x):
+                        GLib.idle_add(
+                            lambda: self._toast("El portapapeles contiene una imagen (se sincroniza automáticamente al copiar)")
+                            or False
+                        )
+                        return
+                    rc_x, x_out, _ = run_cmd(["xclip", "-o", "-selection", "clipboard"], timeout=2.0)
+                    if rc_x == 0 and x_out:
+                        GLib.idle_add(lambda o=x_out: self.clip_text_view.get_buffer().set_text(o) or False)
+                        return
+                elif shutil.which("xsel"):
+                    rc_s, s_out, _ = run_cmd(["xsel", "-ob"], timeout=2.0)
+                    if rc_s == 0 and s_out:
+                        GLib.idle_add(lambda o=s_out: self.clip_text_view.get_buffer().set_text(o) or False)
+                        return
+
+            GLib.idle_add(lambda: read_via_gdk_fallback() or False)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1317,7 +1492,7 @@ class ControidWindow(Adw.ApplicationWindow):
             self._toast("La imagen en caché ya no está disponible")
             return
 
-        if shutil.which("wl-copy"):
+        if detect_session_kind() == "wayland" and shutil.which("wl-copy"):
             def worker() -> None:
                 try:
                     with path.open("rb") as fh:
@@ -1584,25 +1759,91 @@ class ControidWindow(Adw.ApplicationWindow):
 
     def _refresh_systemd_status(self) -> None:
         def worker() -> None:
-            rc_act, act, _ = run_cmd(["systemctl", "--user", "is-active", SERVICE_NAME], timeout=2.5)
-            rc_ena, ena, _ = run_cmd(["systemctl", "--user", "is-enabled", SERVICE_NAME], timeout=2.5)
-            text = f"Estado: {act or ('activo' if rc_act == 0 else 'inactivo')} | Arranque: {ena or ('habilitado' if rc_ena == 0 else 'deshabilitado')}"
-            GLib.idle_add(lambda t=text: self.row_systemd.set_subtitle(t) or False)
+            if has_systemd_user():
+                rc_act, act, _ = run_cmd(["systemctl", "--user", "is-active", SERVICE_NAME], timeout=2.5)
+                rc_ena, ena, _ = run_cmd(["systemctl", "--user", "is-enabled", SERVICE_NAME], timeout=2.5)
+                text = f"Estado: {act or ('activo' if rc_act == 0 else 'inactivo')} | Arranque: {ena or ('habilitado' if rc_ena == 0 else 'deshabilitado')}"
+                title = SERVICE_NAME
+            else:
+                rc_pg, _, _ = run_cmd(["pgrep", "-x", "controidd"], timeout=2.0)
+                active = rc_pg == 0 or socket_path().exists()
+                autostart = autostart_desktop_path().is_file()
+                text = f"Proceso: {'activo' if active else 'inactivo'} | Autostart XDG: {'habilitado' if autostart else 'deshabilitado'}"
+                title = "controidd (sin systemd)"
+
+            def update_ui() -> bool:
+                self.row_systemd.set_title(title)
+                self.row_systemd.set_subtitle(text)
+                return False
+
+            GLib.idle_add(update_ui)
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _spawn_daemon_detached(self) -> tuple[bool, str]:
+        exe = resolve_controid_bin("controidd")
+        if not exe:
+            return False, "No se encontró el binario controidd en PATH ni en ~/.local/bin"
+        log_file = daemon_log_path()
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with log_file.open("ab") as fh:
+                subprocess.Popen(
+                    [exe],
+                    stdin=subprocess.DEVNULL,
+                    stdout=fh,
+                    stderr=fh,
+                    start_new_session=True,
+                )
+            return True, f"controidd iniciado (log en {log_file})"
+        except Exception as exc:
+            return False, f"No se pudo iniciar controidd: {exc}"
+
     def _run_systemd_action(self, action: str) -> None:
         def worker() -> None:
-            args = (
-                ["systemctl", "--user", "enable", "--now", SERVICE_NAME]
-                if action == "enable"
-                else ["systemctl", "--user", action, SERVICE_NAME]
-            )
-            rc, out, err = run_cmd(args, timeout=8.0)
-            if rc == 0:
-                self._toast(f"systemd: {action} ejecutado")
+            if has_systemd_user():
+                args = (
+                    ["systemctl", "--user", "enable", "--now", SERVICE_NAME]
+                    if action == "enable"
+                    else ["systemctl", "--user", action, SERVICE_NAME]
+                )
+                rc, out, err = run_cmd(args, timeout=8.0)
+                if rc == 0:
+                    self._toast(f"systemd: {action} ejecutado")
+                else:
+                    self._toast(f"Error systemd ({action}): {err or out}")
             else:
-                self._toast(f"Error systemd ({action}): {err or out}")
+                if action == "start":
+                    ok, msg = self._spawn_daemon_detached()
+                    self._toast(msg if ok else msg)
+                elif action == "stop":
+                    rc, _, err = run_cmd(["pkill", "-TERM", "-x", "controidd"], timeout=4.0)
+                    self._toast("controidd detenido" if rc in (0, 1) else f"Error al detener: {err}")
+                elif action == "restart":
+                    run_cmd(["pkill", "-TERM", "-x", "controidd"], timeout=4.0)
+                    time.sleep(0.6)
+                    _, msg = self._spawn_daemon_detached()
+                    self._toast(msg)
+                elif action == "enable":
+                    desktop = autostart_desktop_path()
+                    if desktop.is_file():
+                        desktop.unlink()
+                        self._toast("Autostart XDG deshabilitado")
+                    else:
+                        exe = resolve_controid_bin("controidd") or "controidd"
+                        desktop.parent.mkdir(parents=True, exist_ok=True)
+                        desktop.write_text(
+                            "[Desktop Entry]\n"
+                            "Type=Application\n"
+                            "Name=Controid Daemon\n"
+                            "Comment=Android & Linux continuity daemon\n"
+                            f"Exec={exe}\n"
+                            "Terminal=false\n"
+                            "X-GNOME-Autostart-enabled=true\n",
+                            encoding="utf-8",
+                        )
+                        self._toast(f"Autostart XDG habilitado en {desktop}")
+
             self._refresh_systemd_status()
             time.sleep(0.6)
             self._refresh_status_once()
@@ -1672,11 +1913,22 @@ class ControidWindow(Adw.ApplicationWindow):
 
     def _refresh_journal(self) -> None:
         def worker() -> None:
-            rc, out, err = run_cmd(
-                ["journalctl", "--user", "-u", SERVICE_NAME, "-n", "60", "--no-pager", "-o", "short-iso"],
-                timeout=4.0,
-            )
-            text = out if rc == 0 else (err or "journalctl no disponible")
+            if has_systemd_user() and shutil.which("journalctl"):
+                rc, out, err = run_cmd(
+                    ["journalctl", "--user", "-u", SERVICE_NAME, "-n", "60", "--no-pager", "-o", "short-iso"],
+                    timeout=4.0,
+                )
+                text = out if rc == 0 else (err or "journalctl no disponible")
+            else:
+                log_file = daemon_log_path()
+                if log_file.is_file():
+                    lines = log_file.read_text(encoding="utf-8", errors="replace").splitlines()
+                    text = "\n".join(lines[-60:]) if lines else f"{log_file} está vacío"
+                else:
+                    text = (
+                        "Entorno sin systemd usuario.\n"
+                        f"Cuando inicies controidd desde el panel, su log se guardará en {log_file}."
+                    )
             GLib.idle_add(lambda t=text: self._set_journal_text(t) or False)
 
         threading.Thread(target=worker, daemon=True).start()
@@ -1688,7 +1940,7 @@ class ControidWindow(Adw.ApplicationWindow):
     def _update_logs_buffer(self) -> None:
         ev_block = "\n".join(self.event_log_lines) if self.event_log_lines else "(Sin eventos IPC recientes)"
         j_block = getattr(self, "_last_journal", "")
-        combined = f"=== Eventos IPC en vivo ===\n{ev_block}\n\n=== Servicio controid.service (últimas 60 líneas) ===\n{j_block}"
+        combined = f"=== Eventos IPC en vivo ===\n{ev_block}\n\n=== Servicio / Demonio (últimas 60 líneas) ===\n{j_block}"
         self.logs_view.get_buffer().set_text(combined)
 
 

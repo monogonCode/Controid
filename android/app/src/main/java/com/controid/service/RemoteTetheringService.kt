@@ -3,7 +3,9 @@ package com.controid.service
 import android.annotation.SuppressLint
 import android.content.AttributionSource
 import android.content.ClipData
+import android.content.ContentResolver
 import android.content.res.AssetFileDescriptor
+import android.database.ContentObserver
 import android.database.Cursor
 import android.net.Uri
 import android.os.Binder
@@ -28,6 +30,7 @@ import com.controid.protocol.LinkStatus
 import java.io.File
 import java.io.FileInputStream
 import java.io.InputStream
+import java.lang.reflect.InvocationTargetException
 import java.lang.reflect.Method
 import java.lang.reflect.Proxy
 import java.security.MessageDigest
@@ -79,6 +82,12 @@ class RemoteTetheringService : IRemoteTetheringService.Stub() {
     private val dispatchedScreenshotKeys = LinkedHashSet<String>()
     private var screenshotPollTick = 0
     private val screenshotScanQueued = AtomicBoolean(false)
+    private var mediaContentObserver: ContentObserver? = null
+    private var mediaContentObserverResolver: ContentResolver? = null
+    private var mediaContentService: Any? = null
+    private var mediaContentServiceObserver: Any? = null
+    private val warnedClipboardAccess = AtomicBoolean(false)
+    private val warnedTetherRestriction = AtomicBoolean(false)
     private val fileSystemHandler by lazy { RemoteFileSystemHandler() }
 
     override fun startWifiTethering(prefer5Ghz: Boolean, callback: IRemoteTetheringCallback?) {
@@ -274,12 +283,26 @@ class RemoteTetheringService : IRemoteTetheringService.Stub() {
 
             invokeStartTethering(connector, parcel, resultListener)
         } catch (t: Throwable) {
-            Log.e(TAG, "Failed to start Wi-Fi tethering via ITetheringConnector", t)
+            val cause = unwrapCause(t)
+            Log.e(TAG, "Failed to start Wi-Fi tethering via ITetheringConnector", cause)
             if (prefer5Ghz && allowFallbackTo2Ghz) {
                 restoreSavedSoftApConfigIfNeeded()
                 startWifiTetheringInternal(prefer5Ghz = false, allowFallbackTo2Ghz = false)
+            } else if (isStructuralTetherApiMismatch(cause)) {
+                Log.w(TAG, "ITetheringConnector API mismatch on OEM build; trying legacy ConnectivityManager fallback")
+                restoreSavedSoftApConfigIfNeeded()
+                startViaLegacyConnectivityManager()
+            } else if (cause is SecurityException) {
+                restoreSavedSoftApConfigIfNeeded()
+                if (warnedTetherRestriction.compareAndSet(false, true)) {
+                    Log.w(TAG, "OEM or carrier restricted programmatic tethering: ${cause.message}")
+                }
+                notifyStatus(
+                    LinkStatus.ERR_PROVISIONING_FAILED,
+                    "OEM/permission restriction: ${cause.message ?: cause.javaClass.simpleName}"
+                )
             } else {
-                notifyStatus(LinkStatus.ERR_UNKNOWN, t.message ?: t.javaClass.simpleName)
+                notifyStatus(LinkStatus.ERR_UNKNOWN, cause.message ?: cause.javaClass.simpleName)
             }
         }
     }
@@ -370,8 +393,16 @@ class RemoteTetheringService : IRemoteTetheringService.Stub() {
                 else -> throw NoSuchMethodException("IConnectivityManager.startTethering not found")
             }
         } catch (t: Throwable) {
-            Log.e(TAG, "Legacy tethering start failed", t)
-            notifyStatus(LinkStatus.ERR_UNKNOWN, t.message ?: "Legacy tethering error")
+            val cause = unwrapCause(t)
+            Log.e(TAG, "Legacy tethering start failed", cause)
+            if (cause is SecurityException) {
+                notifyStatus(
+                    LinkStatus.ERR_PROVISIONING_FAILED,
+                    "OEM/permission restriction: ${cause.message ?: cause.javaClass.simpleName}"
+                )
+            } else {
+                notifyStatus(LinkStatus.ERR_UNKNOWN, cause.message ?: "Legacy tethering error")
+            }
         }
     }
 
@@ -942,12 +973,12 @@ class RemoteTetheringService : IRemoteTetheringService.Stub() {
 
     private fun startScreenshotWatcherLocked() {
         if (destroyed.get() || screenshotObserversStarted || clipboardCallbacks.isEmpty()) return
+        registerMediaContentObserverLocked()
         val seenCanonical = HashSet<String>()
         for (dir in candidateScreenshotDirs()) {
             val canonical = runCatching { dir.canonicalPath }.getOrElse { dir.absolutePath }
             if (!seenCanonical.add(canonical)) continue
             if (!dir.isDirectory || !dir.canRead()) {
-                Log.w(TAG, "Screenshot dir unavailable: ${dir.absolutePath} isDir=${dir.isDirectory} canRead=${dir.canRead()}")
                 continue
             }
             val observer = createScreenshotFileObserver(dir) ?: continue
@@ -961,11 +992,157 @@ class RemoteTetheringService : IRemoteTetheringService.Stub() {
                 screenshotObservers.add(observer)
             }
         }
-        Log.i(TAG, "Screenshot watchers started: count=${screenshotObservers.size}")
+        Log.i(
+            TAG,
+            "Screenshot watchers started: fileObservers=${screenshotObservers.size} contentObserver=${mediaContentObserver != null}"
+        )
         screenshotObserversStarted = true
     }
 
+    @SuppressLint("PrivateApi")
+    private fun registerMediaContentObserverLocked() {
+        if (mediaContentObserver != null) return
+        val observer = object : ContentObserver(null) {
+            override fun onChange(selfChange: Boolean) {
+                onChange(selfChange, null)
+            }
+
+            override fun onChange(selfChange: Boolean, uri: Uri?) {
+                if (destroyed.get()) return
+                Log.d(TAG, "MediaStore Images ContentObserver change uri=$uri")
+                scheduleScreenshotCheck(
+                    pendingFallbackFile = null,
+                    allowDirectFallback = false,
+                    delayMs = SCREENSHOT_EVENT_DELAY_MS
+                )
+            }
+        }
+
+        val resolver = resolveAppContentResolver()
+        if (resolver != null) {
+            val ok = runCatching {
+                resolver.registerContentObserver(MEDIA_IMAGES_URI, true, observer)
+                true
+            }.onFailure {
+                Log.w(TAG, "ContentResolver.registerContentObserver failed; trying IContentService fallback", it)
+            }.getOrDefault(false)
+            if (ok) {
+                mediaContentObserver = observer
+                mediaContentObserverResolver = resolver
+                return
+            }
+        }
+
+        val contentBinder = runCatching { SystemServiceHelper.getSystemService("content") }.getOrNull()
+        if (contentBinder != null && contentBinder.isBinderAlive) {
+            val registered = runCatching {
+                val stubClass = Class.forName("android.content.IContentService\$Stub")
+                val service = stubClass.getMethod("asInterface", IBinder::class.java).invoke(null, contentBinder)
+                    ?: return@runCatching false
+                val iObserver = observer.javaClass.getMethod("getContentObserver").invoke(observer)
+                    ?: return@runCatching false
+                val methods = service.javaClass.methods
+                    .filter { it.name == "registerContentObserver" }
+                    .sortedBy { it.parameterCount }
+                for (method in methods) {
+                    val args = buildContentObserverRegisterArgs(method, iObserver) ?: continue
+                    val invoked = runCatching {
+                        method.invoke(service, *args)
+                        true
+                    }.getOrDefault(false)
+                    if (invoked) {
+                        mediaContentObserver = observer
+                        mediaContentService = service
+                        mediaContentServiceObserver = iObserver
+                        return@runCatching true
+                    }
+                }
+                false
+            }.onFailure {
+                Log.w(TAG, "IContentService.registerContentObserver fallback failed", unwrapCause(it))
+            }.getOrDefault(false)
+            if (registered) return
+        }
+
+        runCatching { observer.javaClass.getMethod("releaseContentObserver").invoke(observer) }
+    }
+
+    @SuppressLint("PrivateApi")
+    private fun resolveAppContentResolver(): ContentResolver? {
+        return runCatching {
+            val atClass = Class.forName("android.app.ActivityThread")
+            val app = atClass.getMethod("currentApplication").invoke(null) as? android.content.Context
+            if (app != null) return@runCatching app.contentResolver
+            val thread = atClass.getMethod("currentActivityThread").invoke(null) ?: return@runCatching null
+            val sysCtx = atClass.getMethod("getSystemContext").invoke(thread) as? android.content.Context
+            sysCtx?.contentResolver
+        }.getOrNull()
+    }
+
+    private fun buildContentObserverRegisterArgs(method: Method, iObserver: Any): Array<Any?>? {
+        val params = method.parameterTypes
+        if (params.size < 3) return null
+        val args = arrayOfNulls<Any?>(params.size)
+        var sawUri = false
+        var sawNotifyDesc = false
+        var sawObserver = false
+        var intIdx = 0
+        for (i in params.indices) {
+            val p = params[i]
+            when {
+                p == Uri::class.java && !sawUri -> {
+                    args[i] = MEDIA_IMAGES_URI
+                    sawUri = true
+                }
+                (p == Boolean::class.javaPrimitiveType || p == java.lang.Boolean::class.java) && !sawNotifyDesc -> {
+                    args[i] = true
+                    sawNotifyDesc = true
+                }
+                p.isInstance(iObserver) && !sawObserver -> {
+                    args[i] = iObserver
+                    sawObserver = true
+                }
+                p == Int::class.javaPrimitiveType || p == Integer::class.java -> {
+                    // userHandle (0) first, targetSdkVersion second if present
+                    args[i] = if (intIdx == 0) 0 else Build.VERSION.SDK_INT
+                    intIdx++
+                }
+                else -> return null
+            }
+        }
+        return if (sawUri && sawNotifyDesc && sawObserver) args else null
+    }
+
+    private fun unregisterMediaContentObserverLocked() {
+        val observer = mediaContentObserver
+        val resolver = mediaContentObserverResolver
+        val service = mediaContentService
+        val iObserver = mediaContentServiceObserver
+        mediaContentObserver = null
+        mediaContentObserverResolver = null
+        mediaContentService = null
+        mediaContentServiceObserver = null
+
+        if (observer != null && resolver != null) {
+            runCatching { resolver.unregisterContentObserver(observer) }
+        }
+        if (service != null && iObserver != null) {
+            runCatching {
+                val m = service.javaClass.methods.firstOrNull {
+                    it.name == "unregisterContentObserver" &&
+                        it.parameterCount == 1 &&
+                        it.parameterTypes[0].isInstance(iObserver)
+                }
+                m?.invoke(service, iObserver)
+            }
+        }
+        if (observer != null) {
+            runCatching { observer.javaClass.getMethod("releaseContentObserver").invoke(observer) }
+        }
+    }
+
     private fun stopScreenshotWatcherLocked() {
+        unregisterMediaContentObserverLocked()
         for (observer in screenshotObservers) {
             runCatching { observer.stopWatching() }
         }
@@ -1051,20 +1228,20 @@ class RemoteTetheringService : IRemoteTetheringService.Stub() {
 
     private fun seedInitialScreenshotState() {
         if (destroyed.get()) return
-        val latest = queryLatestMediaScreenshots(afterId = -1L, descending = true, limit = 1)
-        if (latest == null) {
+        val scan = queryLatestMediaScreenshots(afterId = -1L, descending = true, limit = 1)
+        if (scan == null) {
             Log.w(TAG, "seedInitialScreenshotState: MediaStore query returned null")
         } else {
-            Log.i(TAG, "seedInitialScreenshotState: maxId=${latest.firstOrNull()?.id ?: 0L}")
+            Log.i(TAG, "seedInitialScreenshotState: maxId=${scan.maxScannedId}")
         }
-        val maxId = latest?.firstOrNull()?.id ?: 0L
+        val maxId = scan?.maxScannedId ?: 0L
         val nowMs = System.currentTimeMillis()
         synchronized(clipboardLock) {
             if (clipboardCallbacks.isEmpty()) return
-            if (!screenshotSeeded && (latest != null || screenshotSeedTimeMs == 0L)) {
+            if (!screenshotSeeded && (scan != null || screenshotSeedTimeMs == 0L)) {
                 lastSeenScreenshotId = maxId
                 screenshotSeedTimeMs = nowMs
-                if (latest != null) {
+                if (scan != null) {
                     screenshotSeeded = true
                 }
             }
@@ -1217,26 +1394,31 @@ class RemoteTetheringService : IRemoteTetheringService.Stub() {
         }
 
         var matchedFallback = false
-        val rows = if (seeded) {
+        val scan = if (seeded) {
             queryLatestMediaScreenshots(
                 afterId = afterId,
                 descending = false,
                 limit = MAX_SCREENSHOT_BATCH
-            ) ?: emptyList()
+            )
         } else {
-            emptyList()
+            null
         }
+        val rows = scan?.rows ?: emptyList()
 
+        var heldByPending = false
         for (row in rows) {
+            if (row.isPending != 0 || row.sizeBytes <= 0L) {
+                heldByPending = true
+                continue
+            }
             if (!isCompletedScreenshotFilename(row.displayName) ||
                 row.sizeBytes > MAX_CLIPBOARD_STREAM_BYTES
             ) {
-                synchronized(clipboardLock) {
-                    if (row.id > lastSeenScreenshotId) lastSeenScreenshotId = row.id
+                if (!heldByPending) {
+                    synchronized(clipboardLock) {
+                        if (row.id > lastSeenScreenshotId) lastSeenScreenshotId = row.id
+                    }
                 }
-                continue
-            }
-            if (row.sizeBytes <= 0L) {
                 continue
             }
             val idKey = "id:${row.id}"
@@ -1252,7 +1434,7 @@ class RemoteTetheringService : IRemoteTetheringService.Stub() {
             }
             if (alreadyDispatched) {
                 synchronized(clipboardLock) {
-                    if (row.id > lastSeenScreenshotId) lastSeenScreenshotId = row.id
+                    if (!heldByPending && row.id > lastSeenScreenshotId) lastSeenScreenshotId = row.id
                     rememberDispatchedScreenshotKeyLocked(idKey)
                 }
                 continue
@@ -1267,9 +1449,17 @@ class RemoteTetheringService : IRemoteTetheringService.Stub() {
             Log.i(TAG, "Screenshot MediaStore dispatch id=${row.id} name=${row.displayName} mime=$mime dispatched=$dispatched")
             if (dispatched) {
                 synchronized(clipboardLock) {
-                    if (row.id > lastSeenScreenshotId) lastSeenScreenshotId = row.id
+                    if (!heldByPending && row.id > lastSeenScreenshotId) lastSeenScreenshotId = row.id
                     rememberDispatchedScreenshotKeyLocked(idKey)
                     if (fileKey != null) rememberDispatchedScreenshotKeyLocked(fileKey)
+                }
+            }
+        }
+
+        if (scan != null && !heldByPending && scan.maxScannedId > 0L) {
+            synchronized(clipboardLock) {
+                if (scan.maxScannedId > lastSeenScreenshotId) {
+                    lastSeenScreenshotId = scan.maxScannedId
                 }
             }
         }
@@ -1326,9 +1516,35 @@ class RemoteTetheringService : IRemoteTetheringService.Stub() {
             ?.takeIf { it.isNotBlank() }
             ?.let { roots.add(it) }
         val dirs = mutableListOf<File>()
+        val staticRelatives = listOf(
+            "Pictures/Screenshots",
+            "DCIM/Screenshots",
+            "Screenshots",
+            "Pictures/ScreenShots",
+            "DCIM/ScreenShots",
+            "ScreenShots",
+            "Pictures/ScreenShot",
+            "DCIM/ScreenShot",
+            "Pictures/Screencaps",
+            "DCIM/Screencaps",
+            "Pictures/Capturas de pantalla",
+            "DCIM/Capturas de pantalla",
+            "Capturas de pantalla",
+            "MIUI/screenshot"
+        )
         for (root in roots) {
-            dirs.add(File(root, "Pictures/Screenshots"))
-            dirs.add(File(root, "DCIM/Screenshots"))
+            for (rel in staticRelatives) {
+                dirs.add(File(root, rel))
+            }
+            for (parentRel in listOf("", "Pictures", "DCIM", "MIUI")) {
+                val parent = if (parentRel.isEmpty()) File(root) else File(root, parentRel)
+                val children = runCatching { parent.listFiles() }.getOrNull() ?: continue
+                for (child in children) {
+                    if (child.isDirectory && isScreenshotDirectoryName(child.name)) {
+                        dirs.add(child)
+                    }
+                }
+            }
         }
         return dirs
     }
@@ -1337,7 +1553,13 @@ class RemoteTetheringService : IRemoteTetheringService.Stub() {
         val id: Long,
         val displayName: String,
         val mimeType: String?,
-        val sizeBytes: Long
+        val sizeBytes: Long,
+        val isPending: Int
+    )
+
+    private data class ScreenshotMediaScanResult(
+        val rows: List<ScreenshotMediaRow>,
+        val maxScannedId: Long
     )
 
     @SuppressLint("PrivateApi")
@@ -1345,7 +1567,7 @@ class RemoteTetheringService : IRemoteTetheringService.Stub() {
         afterId: Long,
         descending: Boolean,
         limit: Int
-    ): List<ScreenshotMediaRow>? {
+    ): ScreenshotMediaScanResult? {
         val am = resolveActivityManager() ?: return null
         val token = Binder()
         val holder = acquireContentProviderExternal(am, "media", 0, token) ?: return null
@@ -1363,14 +1585,19 @@ class RemoteTetheringService : IRemoteTetheringService.Stub() {
                     MediaStore.Images.Media.DISPLAY_NAME,
                     MediaStore.Images.Media.MIME_TYPE,
                     MediaStore.Images.Media.SIZE,
-                    MediaStore.Images.Media.DATA
+                    MediaStore.Images.Media.DATA,
+                    MediaStore.Images.Media.BUCKET_DISPLAY_NAME,
+                    MediaStore.Images.Media.RELATIVE_PATH,
+                    MediaStore.Images.Media.IS_PENDING
                 )
             } else {
                 arrayOf(
                     MediaStore.Images.Media._ID,
                     MediaStore.Images.Media.DISPLAY_NAME,
                     MediaStore.Images.Media.MIME_TYPE,
-                    MediaStore.Images.Media.SIZE
+                    MediaStore.Images.Media.SIZE,
+                    MediaStore.Images.Media.DATA,
+                    MediaStore.Images.Media.BUCKET_DISPLAY_NAME
                 )
             }
 
@@ -1380,19 +1607,12 @@ class RemoteTetheringService : IRemoteTetheringService.Stub() {
                 selectionParts.add("${MediaStore.Images.Media._ID} > ?")
                 selectionArgs.add(afterId.toString())
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                selectionParts.add("${MediaStore.Images.Media.IS_PENDING} = 0")
-                selectionParts.add("(${MediaStore.Images.Media.RELATIVE_PATH} LIKE ? OR ${MediaStore.Images.Media.DATA} LIKE ?)")
-                selectionArgs.add("%Screenshots%")
-                selectionArgs.add("%/Screenshots/%")
-            } else {
-                selectionParts.add("${MediaStore.Images.Media.DATA} LIKE ?")
-                selectionArgs.add("%/Screenshots/%")
-            }
 
             val args = Bundle().apply {
-                putString("android:query-arg-sql-selection", selectionParts.joinToString(" AND "))
-                putStringArray("android:query-arg-sql-selection-args", selectionArgs.toTypedArray())
+                if (selectionParts.isNotEmpty()) {
+                    putString("android:query-arg-sql-selection", selectionParts.joinToString(" AND "))
+                    putStringArray("android:query-arg-sql-selection-args", selectionArgs.toTypedArray())
+                }
                 putString(
                     "android:query-arg-sql-sort-order",
                     if (descending) "${MediaStore.Images.Media._ID} DESC" else "${MediaStore.Images.Media._ID} ASC"
@@ -1404,19 +1624,40 @@ class RemoteTetheringService : IRemoteTetheringService.Stub() {
 
             cursor = invokeProviderQuery(provider, MEDIA_IMAGES_URI, projection, args) ?: return null
             val out = mutableListOf<ScreenshotMediaRow>()
+            var maxScannedId = 0L
+            var scanned = 0
             val idIdx = cursor.getColumnIndex(MediaStore.Images.Media._ID)
             val nameIdx = cursor.getColumnIndex(MediaStore.Images.Media.DISPLAY_NAME)
             val mimeIdx = cursor.getColumnIndex(MediaStore.Images.Media.MIME_TYPE)
             val sizeIdx = cursor.getColumnIndex(MediaStore.Images.Media.SIZE)
             val dataIdx = cursor.getColumnIndex(MediaStore.Images.Media.DATA)
-            while (cursor.moveToNext() && out.size < limit) {
+            val bucketIdx = cursor.getColumnIndex(MediaStore.Images.Media.BUCKET_DISPLAY_NAME)
+            val relIdx = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                cursor.getColumnIndex(MediaStore.Images.Media.RELATIVE_PATH)
+            } else {
+                -1
+            }
+            val pendingIdx = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                cursor.getColumnIndex(MediaStore.Images.Media.IS_PENDING)
+            } else {
+                -1
+            }
+            while (cursor.moveToNext() && scanned < limit) {
+                scanned++
                 if (idIdx < 0) continue
                 val id = cursor.getLong(idIdx)
+                if (id > maxScannedId) maxScannedId = id
                 val rawName = if (nameIdx >= 0) cursor.getString(nameIdx) else null
                 val rawData = if (dataIdx >= 0) cursor.getString(dataIdx) else null
+                val bucket = if (bucketIdx >= 0) cursor.getString(bucketIdx) else null
+                val relPath = if (relIdx >= 0) cursor.getString(relIdx) else null
+                val isPending = if (pendingIdx >= 0) cursor.getInt(pendingIdx) else 0
                 val displayName = rawName?.takeIf { it.isNotBlank() }
                     ?: rawData?.let { File(it).name }
                     ?: continue
+                if (!isScreenshotMediaLocation(displayName, relPath, bucket, rawData)) {
+                    continue
+                }
                 val mimeType = if (mimeIdx >= 0) cursor.getString(mimeIdx) else null
                 var size = if (sizeIdx >= 0) cursor.getLong(sizeIdx) else 0L
                 if (size <= 0L && !rawData.isNullOrBlank()) {
@@ -1427,11 +1668,12 @@ class RemoteTetheringService : IRemoteTetheringService.Stub() {
                         id = id,
                         displayName = displayName,
                         mimeType = mimeType,
-                        sizeBytes = size
+                        sizeBytes = size,
+                        isPending = isPending
                     )
                 )
             }
-            out
+            ScreenshotMediaScanResult(rows = out, maxScannedId = maxScannedId)
         } catch (t: Throwable) {
             Log.w(TAG, "Failed querying MediaStore screenshots", t)
             null
@@ -1950,12 +2192,18 @@ class RemoteTetheringService : IRemoteTetheringService.Stub() {
     private fun invokeGetPrimaryClip(icb: Any): Pair<Boolean, ClipData?>? {
         val methods = icb.javaClass.methods.filter { it.name == "getPrimaryClip" }
         val ordered = sortClipboardCandidates(methods)
+        var lastError: Throwable? = null
         for (method in ordered) {
             val args = buildClipboardArgs(method, listenerProxy = null) ?: continue
             val result = runCatching { method.invoke(icb, *args) }
             if (result.isSuccess) {
+                warnedClipboardAccess.set(false)
                 return true to (result.getOrNull() as? ClipData)
             }
+            lastError = result.exceptionOrNull()?.let { unwrapCause(it) }
+        }
+        if (lastError != null && warnedClipboardAccess.compareAndSet(false, true)) {
+            Log.w(TAG, "OEM/system rejected IClipboard.getPrimaryClip: ${lastError.message}", lastError)
         }
         return null
     }
@@ -1982,7 +2230,12 @@ class RemoteTetheringService : IRemoteTetheringService.Stub() {
     }
 
     private fun sortClipboardCandidates(methods: List<Method>): List<Method> =
-        methods.sortedBy { it.parameterCount }
+        methods.sortedWith(
+            compareByDescending<Method> { m ->
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+                    m.parameterTypes.any { it == AttributionSource::class.java }
+            }.thenBy { it.parameterCount }
+        )
 
     private fun buildClipboardArgs(method: Method, listenerProxy: Any?): Array<Any?>? {
         val params = method.parameterTypes
@@ -1995,8 +2248,12 @@ class RemoteTetheringService : IRemoteTetheringService.Stub() {
         }
         var sawPackage = false
         for (i in startIdx until params.size) {
-            when (params[i]) {
-                String::class.java -> {
+            val p = params[i]
+            when {
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && p == AttributionSource::class.java -> {
+                    args[i] = buildShellAttributionSource() ?: return null
+                }
+                p == String::class.java -> {
                     if (!sawPackage) {
                         args[i] = SHELL_PKG
                         sawPackage = true
@@ -2004,9 +2261,9 @@ class RemoteTetheringService : IRemoteTetheringService.Stub() {
                         args[i] = null
                     }
                 }
-                Int::class.javaPrimitiveType, Integer::class.java -> args[i] = 0
-                Boolean::class.javaPrimitiveType, java.lang.Boolean::class.java -> args[i] = false
-                Long::class.javaPrimitiveType, java.lang.Long::class.java -> args[i] = 0L
+                p == Int::class.javaPrimitiveType || p == Integer::class.java -> args[i] = 0
+                p == Boolean::class.javaPrimitiveType || p == java.lang.Boolean::class.java -> args[i] = false
+                p == Long::class.javaPrimitiveType || p == java.lang.Long::class.java -> args[i] = 0L
                 else -> return null
             }
         }
@@ -2116,15 +2373,75 @@ class RemoteTetheringService : IRemoteTetheringService.Stub() {
         private const val SCREENSHOT_FALLBACK_POLL_TICKS = 2
         private const val SCREENSHOT_EVENT_DELAY_MS = 150L
         private const val SCREENSHOT_MEDIA_RETRY_DELAY_MS = 450L
-        private const val MAX_SCREENSHOT_BATCH = 5
+        private const val MAX_SCREENSHOT_BATCH = 24
         private const val MAX_DISPATCHED_SCREENSHOT_KEYS = 64
         private val MEDIA_IMAGES_URI: Uri = MediaStore.Images.Media.EXTERNAL_CONTENT_URI
         private val SCREENSHOT_IMAGE_EXTENSIONS = setOf("png", "jpg", "jpeg", "webp", "heic", "heif", "bmp")
+        private val SCREENSHOT_LOCATION_TOKENS = listOf(
+            "screenshot",
+            "screen_shot",
+            "screen-shot",
+            "screencap",
+            "captura",
+            "截屏",
+            "スクリーンショット"
+        )
         private const val PIPE_CHUNK_SIZE = 16 * 1024
         private const val MAX_CLIPBOARD_STREAM_BYTES = 64L * 1024L * 1024L
         private const val AP_WARMUP_GRACE_MS = 10_000L
         private const val IDLE_AFTER_DISCONNECT_MS = 120_000L
         private const val IDLE_NEVER_CONNECTED_MS = 300_000L
+
+        internal fun unwrapCause(t: Throwable): Throwable {
+            var cur = t
+            while (cur is InvocationTargetException && cur.targetException != null) {
+                cur = cur.targetException!!
+            }
+            return cur
+        }
+
+        internal fun isStructuralTetherApiMismatch(cause: Throwable): Boolean =
+            cause is NoSuchMethodException ||
+                cause is ClassNotFoundException ||
+                cause is IllegalArgumentException ||
+                cause is IllegalAccessException ||
+                cause is NoSuchFieldException
+
+        internal fun isScreenshotDirectoryName(name: String): Boolean {
+            val lower = name.trim().lowercase(Locale.ROOT)
+            if (lower.isEmpty()) return false
+            return SCREENSHOT_LOCATION_TOKENS.any { token -> lower.contains(token) }
+        }
+
+        internal fun isScreenshotMediaLocation(
+            displayName: String?,
+            relativePath: String?,
+            bucketDisplayName: String?,
+            dataPath: String?
+        ): Boolean {
+            val relLower = relativePath?.lowercase(Locale.ROOT).orEmpty()
+            val bucketLower = bucketDisplayName?.lowercase(Locale.ROOT).orEmpty()
+            val parentDataLower = dataPath
+                ?.substringBeforeLast('/', "")
+                ?.lowercase(Locale.ROOT)
+                .orEmpty()
+            if (SCREENSHOT_LOCATION_TOKENS.any { token ->
+                    relLower.contains(token) || bucketLower.contains(token) || parentDataLower.contains(token)
+                }
+            ) {
+                return true
+            }
+            val fileLower = displayName?.lowercase(Locale.ROOT).orEmpty()
+            val inPicturesOrDcim = relLower.contains("pictures") ||
+                relLower.contains("dcim") ||
+                parentDataLower.contains("/pictures") ||
+                parentDataLower.contains("/dcim")
+            return inPicturesOrDcim && (
+                fileLower.startsWith("screenshot") ||
+                    fileLower.startsWith("screen_shot") ||
+                    fileLower.startsWith("captura")
+                )
+        }
 
         internal fun isCompletedScreenshotFilename(name: String): Boolean {
             val clean = name.substringAfterLast('/').trim()

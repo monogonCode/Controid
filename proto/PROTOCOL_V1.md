@@ -26,6 +26,9 @@ Default Port: `55777` (over Wi-Fi Hotspot gateway, typically `192.168.43.1`).
   - `0x02`: `CLIP_DATA` (Massive clipboard payloads / files in <= 16 KB chunks)
   - `0x03`: `MEDIA_STREAM` (Raw Annex-B H.264/H.265 NAL stream)
   - `0x04`: `INPUT_FALLBACK` (Fallback pointer/key/scroll events for `/dev/uinput`)
+  - `0x05`: `REMOTE_INPUT` (Desktop -> Android remote pointer/key events)
+  - `0x06`: `FILES` (Phone filesystem browse & pull RPC)
+  - `0x07`: `DOCK` (Android Phone Dock <-> Linux Desktop app catalog, icons, runtime state & launch/workspace/media control)
 - `STREAM_ID` (`u16` BE): Transaction/stream identifier (`0` reserved for stateless `CTRL` frames).
 - `FLAGS` (`u16` BE):
   - `0x0001`: `START` (First chunk; payload begins with `total_len: u64 BE` + `mime_len: u16 BE` + `mime_utf8` + initial data)
@@ -68,3 +71,21 @@ First byte of payload is `MSG_TYPE` (`u8`):
 - `0x01` `MOUSE_REL`: `[0x01, dx: i16 BE, dy: i16 BE, wheel: i8]`
 - `0x02` `MOUSE_BTN`: `[0x02, button: u8 (1=Left,2=Right,3=Middle), pressed: u8]`
 - `0x03` `KEY_EVENT`: `[0x03, linux_keycode: u16 BE, pressed: u8]`
+
+## 5. Phone Dock Channel (`0x07`) Messages
+
+Messages larger than `16 KB` (such as `DOCK_SNAPSHOT` and `DOCK_ICON_RESP`) use standard `START`/`END` multi-frame stream reassembly (Dock assigns `STREAM_ID` in `0x8001..=0xFFFE`). First byte of reassembled payload is `DOCK_OP` (`u8`):
+
+### Android -> Linux Requests
+- `0x01` `DOCK_LIST_REQ`: `[0x01, json_utf8({"force_refresh": bool})]`
+- `0x02` `DOCK_ICON_REQ`: `[0x02, json_utf8({"ids": [...], "size": u32})]`
+- `0x03` `DOCK_LAUNCH_REQ`: `[0x03, json_utf8({"desktop_id": "...", "action": "activate|new_window|focus|close"})]`
+- `0x04` `DOCK_PIN_SET`: `[0x04, json_utf8({"desktop_id": "...", "pinned": bool})]`
+- `0x05` `DOCK_SYSTEM_ACTION`: `[0x05, json_utf8({"action": "workspace_switch|media_play_pause|media_next|media_prev|media_seek_fwd|media_seek_back|volume_up|volume_down|volume_mute|mic_mute|lock|screenshot", "value": "..."})]`
+
+### Linux -> Android Responses / Events
+- `0x81` `DOCK_SNAPSHOT`: `[0x81, json_utf8(DockSnapshotPayload)]`
+- `0x82` `DOCK_ICON_RESP`: `[0x82, id_len: u16 BE, id_utf8, hash_len: u16 BE, hash_utf8, png_bytes]`
+- `0x83` `DOCK_LAUNCH_ACK`: `[0x83, json_utf8({"desktop_id": "...", "ok": bool, "action": "...", "error": "..."})]`
+- `0x84` `DOCK_RUNTIME_UPDATE`: `[0x84, json_utf8(DockRuntimeUpdate)]`
+- `0x85` `DOCK_MEDIA_SPECTRUM`: `[0x85, bar0: u8, bar1: u8, ..., bar15: u8]` (17 bytes total; 16 bars normalized `0..=100`)

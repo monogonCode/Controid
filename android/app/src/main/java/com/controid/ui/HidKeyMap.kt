@@ -21,20 +21,28 @@ internal object HidKeyMap {
     const val KEY_BACKSPACE = 14
     const val KEY_TAB = 15
     const val KEY_ENTER = 28
+    const val KEY_SPACE = 57
     const val KEY_UP = 103
     const val KEY_LEFT = 105
     const val KEY_RIGHT = 106
     const val KEY_DOWN = 108
+    const val KEY_DELETE = 111
+    const val KEY_COMPOSE = 127
 
     const val HID_ESC = 0x29
     const val HID_BACKSPACE = 0x2A
     const val HID_TAB = 0x2B
     const val HID_ENTER = 0x28
+    const val HID_SPACE = 0x2C
+    const val HID_DELETE = 0x4C
     const val HID_RIGHT = 0x4F
     const val HID_LEFT = 0x50
     const val HID_DOWN = 0x51
     const val HID_UP = 0x52
+    const val HID_COMPOSE = 0x65
 
+    const val CONSUMER_FAST_FORWARD = 0x00B3
+    const val CONSUMER_REWIND = 0x00B4
     const val CONSUMER_NEXT = 0x00B5
     const val CONSUMER_PREV = 0x00B6
     const val CONSUMER_PLAY_PAUSE = 0x00CD
@@ -103,7 +111,34 @@ internal object HidKeyMap {
             '>' -> KeyMapping(0x37, 52, shift = true)
             '/' -> KeyMapping(0x38, 53)
             '?' -> KeyMapping(0x38, 53, shift = true)
-            else -> null
+            else -> normalizeFallbackChar(ch)?.let(::mapChar)
         }
+    }
+
+    /**
+     * Maps common accented Latin letters and typographic punctuation onto ASCII equivalents
+     * so live Android IME input never silently drops characters on US/generic HID layouts.
+     */
+    private fun normalizeFallbackChar(ch: Char): Char? = when (ch) {
+        'á', 'à', 'ä', 'â', 'ã', 'å' -> 'a'
+        'Á', 'À', 'Ä', 'Â', 'Ã', 'Å' -> 'A'
+        'é', 'è', 'ë', 'ê' -> 'e'
+        'É', 'È', 'Ë', 'Ê' -> 'E'
+        'í', 'ì', 'ï', 'î' -> 'i'
+        'Í', 'Ì', 'Ï', 'Î' -> 'I'
+        'ó', 'ò', 'ö', 'ô', 'õ' -> 'o'
+        'Ó', 'Ò', 'Ö', 'Ô', 'Õ' -> 'O'
+        'ú', 'ù', 'ü', 'û' -> 'u'
+        'Ú', 'Ù', 'Ü', 'Û' -> 'U'
+        'ñ' -> 'n'
+        'Ñ' -> 'N'
+        'ç' -> 'c'
+        'Ç' -> 'C'
+        '¿' -> '?'
+        '¡' -> '!'
+        '–', '—' -> '-'
+        '“', '”' -> '"'
+        '‘', '’' -> '\''
+        else -> null
     }
 }

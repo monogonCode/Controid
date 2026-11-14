@@ -5,22 +5,35 @@
 <h1 align="center">Controid</h1>
 
 <p align="center">
-  <strong>Conecta tu móvil Android con tu PC Linux de forma nativa, privada y sin cables.</strong><br/>
-  Portapapeles compartido (texto e imágenes), pantalla interactiva, trackpad/teclado Bluetooth y archivos del móvil montados como carpeta local.
-<p align="center"><a href="https://controid.monogoncode.dev">Web del proyecto</a></p></p>
+  <strong>Tu Android y tu PC Linux unidos de forma nativa, privada y sin cables.</strong><br/>
+  Dock remoto de apps, control multimedia, trackpad/teclado Bluetooth, portapapeles compartido, pantalla interactiva y archivos del móvil montados como carpeta local.
+</p>
+
+<p align="center">
+  <a href="https://controid.monogoncode.dev">Web del proyecto</a> •
+  <a href="#qué-puedes-hacer-con-controid">Funciones</a> •
+  <a href="#requisitos-previos">Requisitos</a> •
+  <a href="#guía-de-instalación">Instalación</a> •
+  <a href="#primer-emparejamiento">Conexión</a> •
+  <a href="#guía-de-uso">Cómo se usa</a> •
+  <a href="#licencia">Licencia</a>
+</p>
 ---
 
-## ¿Qué hace Controid?
+## ¿Qué puedes hacer con Controid?
 
-Controid une tu teléfono Android y tu escritorio Linux en una sola experiencia fluida, funcionando 100% en tu red local o mediante el hotspot del móvil, sin servidores externos:
+Controid conecta tu teléfono Android y tu PC Linux directamente en tu red local (o activando el hotspot del móvil por Bluetooth LE), **100% en local y sin servidores externos**:
 
-- **Portapapeles compartido al instante (Linux ⇄ Android):** copia texto o imágenes (incluidas capturas de pantalla) en un dispositivo y pégalos en el otro. Soporta desde texto corto hasta imágenes o archivos grandes (hasta 512 MiB en Linux / 64 MiB por flujo en Android).
-- **Pantalla del móvil en tu PC con control total:** abre una ventana nativa (`controid-viewer` con vídeo H.264/H.265) para ver la pantalla de tu Android y controlarlo con el ratón (clics, arrastre y rueda) y teclado del ordenador.
-- **Usa el móvil como Trackpad y Teclado para Linux:** mueve el cursor, haz clic, desplázate y escribe en el ordenador usando tu teléfono por Bluetooth HID (sin latencia ni cables), con respaldo automático por red local (`/dev/uinput`).
-- **Archivos del móvil como un disco local (`~/Controid`):** explora, lee, edita, copia y borra archivos del almacenamiento interno del teléfono desde tu gestor de archivos o terminal mediante FUSE3.
-- **Conexión automática sin complicaciones:** activa el hotspot Wi-Fi del móvil automáticamente por Bluetooth Low Energy (BLE) al necesitar conectarte, o conéctate por **LAN directa** si ambos están en el mismo Wi-Fi.
-- **Autenticación segura:** cada sesión verifica la identidad del PC con firma criptográfica **Ed25519**.
-- **Interfaz gráfica + CLI + Bandeja:** incluye centro de control gráfico en GTK4 (`controid-gui`), herramienta de terminal (`controid`), icono de bandeja (`controid-tray`) y salida JSON lista para Waybar.
+| Función | Qué hace en la práctica |
+|---|---|
+| **Dock del PC en el móvil (`Dock`)** | Ve todas las apps instaladas en tu Linux con sus iconos reales, filtra por categoría o *workspace*, abre/enfoca/cierra ventanas y cambia de espacio de trabajo desde el teléfono (vista **Dock** o **Tarjetas**). |
+| **Control multimedia y sistema** | Reproduce, pausa, cambia de pista, ajusta el volumen, silencia el micrófono, bloquea la pantalla del PC o haz una captura, con **espectro de audio en vivo** opcional (`cava`). |
+| **Trackpad y Teclado (`Pad`)** | Usa la pantalla del móvil como ratón y teclado inalámbricos por **Bluetooth HID** (baja latencia), con respaldo automático por red (`/dev/uinput`). |
+| **Portapapeles compartido (`Clip`)** | Copia texto o imágenes (incluidas capturas de pantalla) en un dispositivo y pégalos al instante en el otro, con historial reciente y copia en 1 toque. |
+| **Pantalla del móvil en el PC** | Abre la ventana nativa `controid-viewer` (vídeo H.264/H.265) para ver tu Android y manejarlo con el ratón y teclado del ordenador. |
+| **Archivos en carpeta local** | Monta el almacenamiento interno del teléfono en `~/Controid` mediante **FUSE3** (`controid-mount`) para abrir, copiar o editar archivos como si fuera un disco local. |
+| **Estética basada en [SekaiPop](https://github.com/Blapples/SekaiPop) sincronizable** | Elige entre **8 paletas de color** con modo claro y oscuro tanto en la app Android como en `controid-gui` (GTK4/Libadwaita). |
+| **Seguridad local** | Cada sesión valida el PC mediante clave criptográfica **Ed25519**. |
 
 ---
 
@@ -28,155 +41,129 @@ Controid une tu teléfono Android y tu escritorio Linux en una sola experiencia 
 
 ### 1. En Android
 - **Android 9.0 o superior** (API 28+).
-- **Bluetooth Low Energy (BLE)** si quieres usar descubrimiento/encendido de hotspot y trackpad Bluetooth HID.
-- **[Shizuku](https://shizuku.rikka.app/)** instalado y activo (iniciado por Depuración inalámbrica, ADB o root). Controid usa Shizuku para:
+- **Bluetooth LE** (necesario para emparejamiento rápido, encendido automático del hotspot y modo Trackpad Bluetooth HID).
+- **[Shizuku](https://shizuku.rikka.app/)** instalado y en ejecución (iniciado por *Depuración inalámbrica*, ADB o root). Controid usa Shizuku para:
   - leer el portapapeles en segundo plano y detectar capturas de pantalla,
-  - activar el hotspot Wi-Fi automáticamente,
+  - activar el punto de acceso Wi-Fi automáticamente,
   - capturar la pantalla del sistema e inyectar toques/teclas remotas,
   - exponer el almacenamiento interno por FUSE.
 
 ### 2. En Linux
-- **Entorno gráfico Wayland o X11:**
-  - **Wayland** con `ext_data_control_manager_v1` (KDE Plasma 6, GNOME/Mutter moderno) o `zwlr_data_control_manager_v1` (Hyprland, Sway, River, Wayfire, LabWC, Niri).
-  - **X11 / Xorg** nativo (mediante `XFixes` sobre `CLIPBOARD`, texto e imágenes) y respaldo automático vía **XWayland** si un compositor Wayland no expone `data-control`.
-- **Servicios del sistema:**
-  - Gestor de sesiones `systemd --user`, **o** autostart estándar XDG (`~/.config/autostart/controidd.desktop`) / OpenRC / runit / s6 en distribuciones sin `systemd`.
-  - `bluetoothd` (BlueZ) para BLE y perfil Bluetooth HID.
-  - `NetworkManager` (principal) o `iwd` (`iwctl`) para autoconexión al hotspot Wi-Fi; si ninguno está activo, degrada limpiamente y permite modo **LAN directa**.
-- **Dependencias de compilación y ejecución:**
-  - Rust (`cargo` y `rustc`) + compilador C (`gcc`) + `pkg-config`
-  - Librerías de desarrollo: `libudev` (o `eudev`), `fuse3`, `sdl2`, `libavcodec`, `libswscale`, `libavutil`
-  - Herramientas de escritorio: `python3` (>= 3.11) con PyGObject (`GTK 4` y `Libadwaita`), `fusermount3`, y opcionalmente `wl-clipboard` (Wayland), `xclip`/`xsel` (X11) o `mpv` (visor secundario).
-
-#### Instalación rápida de dependencias por distribución
+- **Sesión gráfica Wayland o X11:**
+  - **Wayland:** Hyprland, Sway, Niri, KDE Plasma 6, GNOME, River, Wayfire o LabWC.
+  - **X11 / Xorg:** soporte nativo (`XFixes` para portapapeles y ventanas EWMH para el Dock).
+- **Servicios base:** `bluetoothd` (BlueZ) para BLE/HID, y `NetworkManager` o `iwd` para autoconexión al hotspot (en modo **LAN directa** no son obligatorios).
+- **Dependencias de compilación y escritorio:**
+  - `cargo`, `rustc`, `gcc`, `pkg-config`
+  - Librerías dev: `libudev` (o `eudev`), `fuse3`, `sdl2`, `libavcodec`, `libswscale`, `libavutil`
+  - Interfaz y herramientas: `python3` (>= 3.11) con PyGObject (`GTK 4` y `Libadwaita`), `fusermount3`
+  - **Opcionales recomendados:** `wl-clipboard` / `xclip`, `playerctl` (controles MPRIS), `cava` (espectro de audio en tiempo real en el Dock), `rsvg-convert` o `magick` (renderizado de iconos SVG para apps del Dock), `mpv` (visor fallback).
 
 <details>
-<summary><strong>Arch Linux / EndeavourOS / CachyOS</strong></summary>
+<summary><strong>Instalar dependencias según tu distribución</strong></summary>
 
+#### Arch Linux / EndeavourOS / CachyOS
 ```bash
 sudo pacman -S --needed \
   rustup gcc pkgconf \
   systemd-libs fuse3 sdl2 ffmpeg \
   python-gobject gtk4 libadwaita \
-  wl-clipboard bluez bluez-utils networkmanager
+  wl-clipboard bluez bluez-utils networkmanager \
+  playerctl cava librsvg
 ```
+*(Si acabas de instalar `rustup`, ejecuta `rustup default stable`.)*
 
-Si acabas de instalar `rustup`:
-```bash
-rustup default stable
-```
-
-</details>
-
-<details>
-<summary><strong>Ubuntu / Debian / Pop!_OS</strong></summary>
-
+#### Ubuntu / Debian / Pop!_OS
 ```bash
 sudo apt update && sudo apt install -y \
   build-essential pkg-config cargo rustc \
   libudev-dev libfuse3-dev fuse3 libsdl2-dev \
   libavcodec-dev libswscale-dev libavutil-dev \
   python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 \
-  wl-clipboard bluez network-manager
+  wl-clipboard bluez network-manager \
+  playerctl librsvg2-bin
 ```
 
-</details>
-
-<details>
-<summary><strong>Fedora</strong></summary>
-
+#### Fedora
 ```bash
 sudo dnf install -y \
   gcc pkgconf-pkg-config cargo rust \
   systemd-devel fuse3 fuse3-devel SDL2-devel \
   ffmpeg-free-devel \
   python3-gobject gtk4 libadwaita \
-  wl-clipboard bluez NetworkManager
+  wl-clipboard bluez NetworkManager \
+  playerctl librsvg2-tools
 ```
+*(En Fedora, habilita RPM Fusion si necesitas soporte completo de FFmpeg H.264/H.265.)*
 
-*(Nota: en Fedora puede requerirse habilitar RPM Fusion si deseas paquetes completos de FFmpeg H.264/H.265.)*
-
-</details>
-
-<details>
-<summary><strong>openSUSE (Tumbleweed / Leap)</strong></summary>
-
+#### openSUSE (Tumbleweed / Leap)
 ```bash
 sudo zypper install -y \
   gcc pkg-config cargo rust \
   libudev-devel fuse3 fuse3-devel libSDL2-devel \
   ffmpeg-6-libavcodec-devel ffmpeg-6-libswscale-devel ffmpeg-6-libavutil-devel \
   python3-gobject typelib-1_0-Gtk-4_0 typelib-1_0-Adw-1 \
-  wl-clipboard xclip bluez NetworkManager
+  wl-clipboard xclip bluez NetworkManager \
+  playerctl rsvg-convert
 ```
 
-</details>
-
-<details>
-<summary><strong>Void Linux (runit)</strong></summary>
-
+#### Void Linux (runit)
 ```bash
 sudo xbps-install -Sy \
   base-devel pkg-config cargo rust \
   eudev-libudev-devel fuse3 fuse3-devel SDL2-devel ffmpeg6-devel \
   python3-gobject gtk4 libadwaita \
-  wl-clipboard xclip bluez NetworkManager
+  wl-clipboard xclip bluez NetworkManager \
+  playerctl librsvg-utils
 ```
 
-</details>
-
-<details>
-<summary><strong>Alpine Linux (OpenRC)</strong></summary>
-
+#### Alpine Linux (OpenRC)
 ```bash
 sudo apk add \
   build-base pkgconf cargo rust \
   eudev-dev fuse3 fuse3-dev sdl2-dev ffmpeg-dev \
   py3-gobject3 gtk4.0 libadwaita \
-  wl-clipboard xclip bluez networkmanager
+  wl-clipboard xclip bluez networkmanager \
+  playerctl rsvg-convert
+```
+
+En distribuciones con `systemd`, activa Bluetooth y red:
+```bash
+sudo systemctl enable --now bluetooth NetworkManager
 ```
 
 </details>
 
-Asegúrate de tener Bluetooth activo y tu gestor de red (`NetworkManager` o `iwd`):
-```bash
-# En distros con systemd:
-sudo systemctl enable --now bluetooth NetworkManager
-```
-
 ---
 
-## Instalación
+## Guía de instalación
 
-### Paso 1: Instalar en Linux
-Clona o entra en la carpeta del proyecto y ejecuta el instalador (como **usuario normal**, nunca con `sudo`):
+### Paso 1: Descargar e instalar en Linux
+Clona el repositorio y ejecuta `./install.sh` **como usuario normal** (nunca con `sudo`):
 
 ```bash
-./install.sh
+git clone https://github.com/monogonCode/Controid.git
+cd Controid
+./install.sh --setup-uinput
 ```
 
-Opciones útiles del instalador:
-- `--setup-uinput`: instala una regla `udev` (`/etc/udev/rules.d/99-controid-uinput.rules`) y añade tu usuario al grupo `input` para habilitar el respaldo de ratón/teclado por TCP cuando no uses Bluetooth HID *(puede requerir cerrar e iniciar sesión una vez)*.
-- `--pair`: ejecuta automáticamente el emparejamiento BLE al finalizar.
-- `--offline`: compila el proyecto Rust sin conexión a internet (`cargo --offline`).
-- `--no-systemd`: instala binarios sin ejecutar comandos `systemctl --user`.
-- `--xdg-autostart`: instala `~/.config/autostart/controidd.desktop` para arranque automático en distros o sesiones sin `systemd`.
+Opciones útiles de `./install.sh`:
+- `--setup-uinput`: configura `/etc/udev/rules.d/99-controid-uinput.rules` y añade tu usuario al grupo `input` para usar el trackpad/teclado por red si no usas Bluetooth HID *(puede requerir cerrar e iniciar sesión una vez)*.
+- `--xdg-autostart`: crea `~/.config/autostart/controidd.desktop` en sistemas o sesiones sin `systemd`.
+- `--no-systemd`: instala los binarios sin ejecutar `systemctl --user`.
+- `--pair`: ejecuta `controid pair` automáticamente al terminar.
+- `--offline`: compila con `cargo --offline`.
 
-Los binarios se instalan en `~/.local/bin/`:
-- `controidd`: demonio principal en segundo plano (`controid.service`).
-- `controid`: línea de comandos.
-- `controid-gui`: interfaz gráfica (también accesible desde el menú de aplicaciones como **Controid**).
-- `controid-viewer`: visor interactivo de pantalla Android.
-- `controid-mount`: adaptador FUSE3 para montar los archivos del teléfono.
-- `controid-tray`: icono en la bandeja del sistema.
+Los ejecutables se instalan en `~/.local/bin/`:
+`controidd` (demonio), `controid` (CLI), `controid-gui` (interfaz gráfica), `controid-viewer` (visor de pantalla), `controid-mount` (FUSE3) y `controid-tray` (bandeja).
 
-> Si `~/.local/bin` no está en tu `PATH`, añádelo a `~/.bashrc` o `~/.zshrc`:
+> Si `~/.local/bin` no está en tu `PATH`, añade a `~/.bashrc` o `~/.zshrc`:
 > ```bash
 > export PATH="$HOME/.local/bin:$PATH"
 > ```
 
-### Paso 2: Instalar la app en Android
-Necesitas **Android SDK** y **ADB** (con *Depuración USB* o *Depuración inalámbrica* activada en el móvil):
+### Paso 2: Compilar e instalar la app en Android
+Con **Android SDK** y **ADB** listos (y *Depuración USB* o *Depuración inalámbrica* activa en tu móvil):
 
 ```bash
 cd android
@@ -184,119 +171,109 @@ cd android
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-### Paso 3: Permisos iniciales en el móvil
-1. Abre **Shizuku** en tu teléfono y asegúrate de que muestre **"Shizuku está en ejecución"**.
-2. Abre **Controid** en el teléfono.
-3. Concede los permisos solicitados: **Bluetooth / Dispositivos cercanos**, **Notificaciones** y **Autorizar Shizuku siempre**.
-4. Recomendado: toca el aviso/ajuste para **desactivar la optimización de batería** en Controid y Shizuku para que el sistema no cierre la conexión en segundo plano.
+### Paso 3: Activar permisos en el móvil
+1. Abre **Shizuku** y comprueba que indique **"Shizuku está en ejecución"**.
+2. Abre **Controid** en el móvil.
+3. Concede **Dispositivos cercanos / Bluetooth**, **Notificaciones** y **Autorizar Shizuku siempre**.
+4. Recomendado: desactiva la **optimización de batería** para **Controid** y **Shizuku** para evitar cierres en segundo plano.
 
 ---
 
-## Primer emparejamiento y conexión
+## Primer emparejamiento
 
-### Opción A: Modo Automático (Bluetooth LE + Hotspot Wi-Fi)
-Ideal para usarlo fuera de casa o cuando el PC no está en la misma red que el móvil:
+### Opción A: Automático (Bluetooth LE + Hotspot Wi-Fi)
+Perfecto si quieres que el móvil encienda su punto de acceso Wi-Fi automáticamente al conectar:
 
-1. **Guarda la red del hotspot una primera vez:** enciende manualmente el punto de acceso Wi-Fi de tu Android y conéctate a él una vez desde tu PC para que **NetworkManager** guarde el nombre (SSID) y la contraseña. Luego puedes apagarlo.
-2. **Empareja los dispositivos:**
-   - Empareja el móvil y el PC por Bluetooth normal (desde Blueman, ajustes del sistema o `bluetoothctl`).
-   - Con la app **Controid** abierta en el móvil, ejecuta en tu PC:
-     ```bash
-     controid pair
-     ```
-   - Esto detecta tu teléfono por BLE, guarda su MAC y el SSID de su hotspot en `~/.config/controid/config.toml` e intercambia las llaves de identidad **Ed25519**.
-3. **Inicia el servicio y abre el panel:**
+1. **Guarda la red del hotspot una vez:** enciende el punto de acceso en tu móvil y conéctate a él una vez desde Linux para que `NetworkManager` o `iwd` guarden el nombre (SSID) y la contraseña. Luego puedes apagarlo.
+2. **Empareja por Bluetooth:** empareja móvil y PC desde los ajustes Bluetooth del sistema (o `bluetoothctl`).
+3. **Empareja Controid:** con la app abierta en Android, ejecuta en Linux:
+   ```bash
+   controid pair
+   ```
+4. **Inicia el demonio y la interfaz:**
    ```bash
    # Con systemd:
    systemctl --user enable --now controid.service
-   # Sin systemd (o con ~/.config/autostart/controidd.desktop):
+   # Sin systemd:
    controidd &
 
    controid-gui
    ```
 
-### Opción B: Modo LAN directa (PC y móvil en el mismo Wi-Fi)
-Si ambos dispositivos comparten el mismo router Wi-Fi y no quieres activar el hotspot:
+### Opción B: LAN directa (mismo Wi-Fi / router)
+Si PC y teléfono están en la misma red Wi-Fi y no necesitas activar el hotspot:
 
-1. Abre `controid-gui`, ve a la pestaña de **Configuración / Conexión**.
-2. Cambia el modo de conexión a **LAN directa** (`direct`) y escribe la IP local de tu teléfono (o usa el botón de autodetección si lo tienes por ADB).
-3. Pulsa **Guardar** y **Conectar**.
+1. Abre `controid-gui` → pestaña **Ajustes**.
+2. Cambia el modo de conexión a **LAN directa** (`direct`) e indica la IP local de tu móvil (puedes usar la autodetección si está conectado por ADB).
+3. Pulsa **Guardar** y luego **Conectar**.
 
-*(También puedes editar `~/.config/controid/config.toml` manualmente con `connection_mode = "direct"` y `direct_host = "192.168.x.x"`.)*
+*(También puedes configurarlo en `~/.config/controid/config.toml` con `connection_mode = "direct"` y `direct_host = "192.168.x.x"`.)*
 
 ---
 
-## Cómo usar Controid
+## Guía de uso
 
-### Desde la interfaz gráfica (`controid-gui`)
-Abre **Controid** desde tu lanzador de aplicaciones o ejecutando `controid-gui`. Desde ahí puedes:
-- Ver estado de conexión, batería, hotspot y controlar el servicio (`systemd` o proceso `controidd` + autostart XDG si no hay `systemd`).
-- Conectar / desconectar manualmente o encender/apagar el hotspot del móvil.
-- Enviar texto o revisar el historial reciente del portapapeles (detectando automáticamente Wayland, X11 o el portapapeles nativo de GTK4).
-- Iniciar/detener la duplicación de pantalla y elegir FPS, tasa de bits (Mbps) y códec (`H.264` o `H.265`).
-- Montar/desmontar `~/Controid` y abrir la carpeta directamente.
-- Ejecutar diagnósticos rápidos para verificar BlueZ, NetworkManager/`iwd`, FUSE3, sesión gráfica/portapapeles, `/dev/uinput`, ADB y logs (`journalctl` o `~/.local/state/controid/controidd.log`).
+### En el móvil (App Android)
+La app se organiza en 4 pestañas principales (y un selector de **Estética SekaiPop** para cambiar entre las 8 paletas y el modo claro/oscuro):
 
-### Controles del visor de pantalla (`controid-viewer`)
-Cuando inicias la duplicación de pantalla:
-- **Clic izquierdo y arrastre:** toque y deslizamiento en la pantalla del teléfono.
-- **Rueda del ratón:** desplazamiento vertical u horizontal.
-- **Teclado del PC:** escribe directamente en campos de texto del móvil.
-- **Atajos de navegación Android:**
-  - `Alt + H`: Inicio (*Home*)
-  - `Alt + B`: Atrás (*Back*)
-  - `Alt + S`: Apps recientes (*Recents*)
-  - `Alt + P`: Botón de encendido / suspender pantalla (*Power*)
+- **`Dock`**: lanza, enfoca o cierra aplicaciones de tu PC; filtra entre *Todo*, *Fijadas*, *Abiertas*, *Frecuentes* o categorías; cambia de *workspace*; y usa los controles multimedia, volumen, espectro de audio, bloqueo de pantalla y captura rápida. Puedes alternar entre vista clásica **Dock** y **Tarjetas**, además de pantalla completa.
+- **`Panel`**: estado en tiempo real de conexión, batería, hotspot y accesos rápidos.
+- **`Pad`**: incluye dos modos arriba:
+  - **Pad**: trackpad multitáctil (1 dedo mueve/clic, 2 dedos o borde derecho hacen scroll), botones Izquierdo/Medio/Derecho y botón de teclado completo (Bluetooth HID o respaldo por red).
+  - **Media**: mando a distancia multimedia con botones de dirección (`OK`, flechas, Atrás, Inicio, Menú), volumen, silencio de micrófono, bloqueo y `PLAY / PAUSA`.
+- **`Clip`**: muestra el último elemento copiado (texto o imagen), permite enviarlo al PC, leer el portapapeles local y copiar al instante desde el historial reciente.
+
+### En el PC Linux (`controid-gui` y `controid-viewer`)
+- **`controid-gui`** (o busca **Controid** en el menú de aplicaciones):
+  - **Panel**: estado de enlace, batería, encender/apagar hotspot, lanzar visor de pantalla (ajustando FPS, Mbps y códec H.264/H.265) y montar/abrir `~/Controid`.
+  - **Clip**: historial y envío rápido de portapapeles entre Linux y Android.
+  - **Ajustes**: modo de conexión (Auto BLE / LAN directa), preferencias del demonio y autostart.
+  - **Logs**: diagnóstico rápido de BlueZ, red, FUSE3, portapapeles, `/dev/uinput`, ADB y registros en vivo.
+- **Visor de pantalla (`controid-viewer`)**:
+  - **Clic izquierdo / arrastre**: toque y deslizamiento en la pantalla Android.
+  - **Rueda del ratón y teclado**: scroll y escritura directa en el teléfono.
+  - **Atajos**: `Alt + H` (Inicio), `Alt + B` (Atrás), `Alt + S` (Recientes), `Alt + P` (Encender/suspender).
 
 ### Desde la terminal (`controid`)
-
 ```bash
-controid status                     # Estado actual de conexión, batería y sesión
-controid connect                    # Conectar ahora (Auto o LAN directa)
-controid disconnect                 # Desconectar (añade --hotspot-off para apagar el hotspot)
-controid hotspot on | off           # Encender o apagar el hotspot del móvil
+controid pair                       # Descubrir móvil por BLE y guardar configuración
+controid status                     # Ver estado de conexión, batería y sesión (--json disponible)
+controid connect                    # Conectar ahora
+controid disconnect                 # Desconectar (añade --hotspot-off para apagar hotspot)
+controid hotspot on | off           # Encender o apagar el hotspot Android
 
-controid screen start               # Iniciar duplicación de pantalla (acepta --max-fps y --bitrate-mbps)
-controid screen stop                # Detener duplicación de pantalla
-controid screen key back            # Enviar tecla: back | home | recents | power
+controid screen start               # Duplicar pantalla (--max-fps / --bitrate-mbps)
+controid screen stop                # Detener duplicación
+controid screen key back            # Tecla remota: back | home | recents | power
 
-controid files mount                # Montar almacenamiento Android en ~/Controid
+controid files mount                # Montar móvil en ~/Controid
 controid files unmount              # Desmontar ~/Controid
-controid files status               # Ver si está montado
+controid files status               # Consultar estado del montaje
 
-controid clipboard send "Hola"      # Enviar texto al portapapeles del teléfono
+controid clipboard send "Hola"      # Enviar texto al portapapeles del móvil
 controid events --waybar            # Flujo NDJSON continuo para barra Waybar (por defecto)
 ```
 
-### Integración con Hyprland / Waybar (opcional)
-- Añade en tu `hyprland.conf`:
-  ```ini
-  exec-once = dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP
-  exec-once = controid-tray
-  ```
-- Puedes conectar `controid events --waybar` a un módulo `custom/controid` en Waybar para mostrar batería y estado de conexión en tu barra superior.
+<details>
+<summary><strong>Integración opcional con Hyprland / Waybar</strong></summary>
+
+En tu `hyprland.conf`:
+```ini
+exec-once = dbus-update-activation-environment --systemd WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP
+exec-once = controid-tray
+```
+Puedes usar `controid events --waybar` en un módulo `custom/controid` de Waybar para mostrar batería y estado de conexión en la barra superior.
+
+</details>
 
 ---
 
-## Compatibilidad y limitaciones
+## Compatibilidad y notas importantes
 
-### En Android
-- **Multi-fabricante (Android 9+ / API 28+):** funciona en AOSP/Pixel, Samsung One UI, Xiaomi HyperOS/MIUI, OnePlus/OPPO ColorOS/OxygenOS, Motorola, Realme, etc. mediante APIs estándar y servicios Shizuku (`IClipboard` con soporte `AttributionSource` en Android 12+, `MediaStore`, `ITetheringConnector` con respaldo `ConnectivityManager`, `SurfaceControl`/`DisplayManagerGlobal`, `BluetoothHidDevice`).
-- **Capturas de pantalla universales:** combina un `ContentObserver` directo sobre `MediaStore.Images.Media.EXTERNAL_CONTENT_URI` con múltiples `FileObserver` (`Pictures/Screenshots`, `DCIM/Screenshots`, `Screenshots`, carpetas localizadas como `Capturas de pantalla`, `MIUI/screenshot` y subcarpetas detectadas dinámicamente), filtrando de forma insensible a mayúsculas por `BUCKET_DISPLAY_NAME`, `RELATIVE_PATH` y `_DATA`, y verificando `IS_PENDING = 0` y tamaño > 0.
-- **Diferencias posibles según el fabricante:**
-  - **Cierre agresivo en segundo plano:** Xiaomi (HyperOS/MIUI), OPPO/OnePlus/Realme (ColorOS) o Samsung pueden restringir servicios si no desactivas la optimización de batería (y en HyperOS/MIUI activar *Inicio automático* / *Depuración USB (Ajustes de seguridad)* para Shizuku).
-  - **Restricciones de portapapeles o tethering:** algunos OEM o operadoras bloquean el aprovisionamiento programático del hotspot o el acceso en segundo plano al portapapeles; Controid intenta respaldos automáticos (5 GHz -> 2.4 GHz, `ITetheringConnector` -> `ConnectivityManager` legado) y reporta diagnósticos claros si el sistema los deniega.
-
-### En Linux
-- **Portapapeles universal (Wayland + X11):** `controidd` detecta automáticamente en tiempo de ejecución el mejor backend disponible y reintenta reconectarse si el servidor gráfico cambia o arranca más tarde:
-  1. `ext_data_control_manager_v1` (KDE Plasma 6, GNOME/Mutter modernos).
-  2. `zwlr_data_control_manager_v1` (Hyprland, Sway, River, Wayfire, LabWC, Niri).
-  3. **X11 / XWayland** nativo mediante `x11rb` + `XFixes` sobre `CLIPBOARD` (texto e imágenes PNG/JPEG).
-  - *Limitación restante:* una sesión Wayland pura sin `ext_data_control_v1` ni `zwlr_data_control_v1` **y** sin XWayland (`DISPLAY`) no permite leer/escribir el portapapeles desde procesos en segundo plano.
-- **Autoconexión Wi-Fi y redes:** usa **NetworkManager** (D-Bus) como backend principal con degradación limpia a **`iwd` (`iwctl`)** y lectura de puerta de enlace desde `/proc/net/route`. Si ningún gestor Wi-Fi está activo, el demonio arranca sin errores y soporta el modo **LAN directa**. En `iwd`, la red del hotspot debe haber sido conectada/guardada previamente en `iwctl`.
-- **Distribuciones sin `systemd`:** compatible con Alpine (OpenRC), Void (runit), Artix, Devuan o Gentoo mediante `./install.sh --xdg-autostart` (o `make install-autostart`) y control directo del proceso desde `controid-gui`.
-- **Bandeja del sistema (`controid-tray`):** si el escritorio carece de `StatusNotifierWatcher` (por ejemplo GNOME sin AppIndicator o gestores minimalistas sin barra), la bandeja espera de forma pasiva sin bloquear ni fallar.
-- **Entrada fallback por red:** requiere permiso de escritura sobre `/dev/uinput` (configurable automáticamente con `./install.sh --setup-uinput`).
+- **Android multi-fabricante:** compatible con Pixel/AOSP, Samsung One UI, Xiaomi HyperOS/MIUI, OnePlus/OPPO ColorOS y Motorola/Realme. En marcas con gestión agresiva de batería (como HyperOS/MIUI o ColorOS), desactiva las restricciones de batería y habilita el inicio en segundo plano para **Controid** y **Shizuku**.
+- **Portapapeles Linux universal:** `controidd` detecta automáticamente `ext_data_control_manager_v1` (KDE Plasma 6, GNOME moderno), `zwlr_data_control_manager_v1` (Hyprland, Sway, Niri, River, Wayfire, LabWC) o `X11 / XWayland` (`XFixes`).
+- **Dock y control multimedia en Linux:** la gestión de ventanas y workspaces soporta de forma nativa **Hyprland**, **Sway**, **Niri** y entornos **X11**. En GNOME/KDE bajo Wayland funciona el lanzamiento de apps de escritorio, multimedia (`playerctl`/`wpctl`/`pactl`) y acciones del sistema con las utilidades instaladas.
+- **Sistemas sin `systemd`:** compatible con Void (`runit`), Alpine (`OpenRC`), Artix o Devuan usando `./install.sh --xdg-autostart` (o `make install-autostart`).
 
 ---
 
@@ -304,22 +281,25 @@ controid events --waybar            # Flujo NDJSON continuo para barra Waybar (p
 
 ```text
 Controid/
-├── android/          # App Android (Kotlin, Jetpack Compose, Shizuku, BLE, HID, Stream, FUSE RPC)
+├── android/          # App Android (Kotlin, Jetpack Compose, Dock, Shizuku, BLE, HID, Stream, FUSE RPC)
 ├── daemon/           # Workspace Rust
 │   └── crates/
-│       ├── core-protocol/     # Framing binario, handshake Ed25519, control de flujo y eco
-│       ├── hyprland-client/   # Portapapeles universal (Wayland ext/wlr + X11 XFixes) y uinput
-│       └── linux-daemon/      # controidd, CLI (controid) y bandeja (controid-tray)
-├── gui/              # Centro de Control gráfico en GTK4 / Libadwaita (controid_gui.py)
+│       ├── core-protocol/     # Protocolo binario v1, handshake Ed25519 y control de flujo
+│       ├── hyprland-client/   # Dock/ventanas Linux, portapapeles Wayland/X11, uinput y vídeo
+│       └── linux-daemon/      # controidd, dock_worker, CLI (controid) y bandeja (controid-tray)
+├── gui/              # Centro de control gráfico en GTK4 / Libadwaita (controid_gui.py)
 ├── tools/            # Herramientas nativas C (controid-viewer y controid-mount)
 ├── systemd/          # Unidad systemd de usuario, lanzador .desktop y autostart XDG
 ├── proto/            # Especificaciones del protocolo v1, BLE GATT e IPC NDJSON
 ├── assets/           # Iconos oficiales de Controid
-└── install.sh        # Script de compilación e instalación en Linux
+├── Makefile          # Atajos de compilación, test e instalación
+└── install.sh        # Instalador automático para Linux
 ```
 
 ---
 
 ## Licencia
 
-Distribuido bajo licencia libre **[MIT](LICENSE)**. Puedes usar, modificar y compartir el proyecto libremente.
+Distribuido bajo la licencia libre **[MIT](LICENSE)**. Puedes usar, modificar, redistribuir y aprender del código libremente manteniendo el aviso de copyright y licencia.
+
+*Nota de diseño:* la interfaz **SekaiPop** de Controid (tanto en Jetpack Compose como en GTK4/Cairo) ha sido implementada desde cero para este proyecto, inspirándose únicamente en el estilo visual de SekaiPop sin reutilizar su código ni sus recursos.

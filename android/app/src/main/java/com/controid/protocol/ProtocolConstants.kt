@@ -24,6 +24,18 @@ object ProtocolConstants {
     const val CHANNEL_INPUT_FALLBACK: Byte = 0x04
     const val CHANNEL_REMOTE_INPUT: Byte = 0x05
     const val CHANNEL_FILES: Byte = 0x06
+    const val CHANNEL_DOCK: Byte = 0x07
+
+    const val DOCK_LIST_REQ: Byte = 0x01
+    const val DOCK_ICON_REQ: Byte = 0x02
+    const val DOCK_LAUNCH_REQ: Byte = 0x03
+    const val DOCK_PIN_SET: Byte = 0x04
+    const val DOCK_SYSTEM_ACTION: Byte = 0x05
+    const val DOCK_SNAPSHOT: Byte = 0x81.toByte()
+    const val DOCK_ICON_RESP: Byte = 0x82.toByte()
+    const val DOCK_LAUNCH_ACK: Byte = 0x83.toByte()
+    const val DOCK_RUNTIME_UPDATE: Byte = 0x84.toByte()
+    const val DOCK_MEDIA_SPECTRUM: Byte = 0x85.toByte()
 
     const val FLAG_START: Short = 0x0001
     const val FLAG_END: Short = 0x0002

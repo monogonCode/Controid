@@ -1,6 +1,9 @@
 package com.controid.service
 
+import androidx.compose.ui.graphics.ImageBitmap
 import com.controid.clipboard.ClipboardEntry
+import com.controid.dock.DockLaunchFeedback
+import com.controid.dock.DockSnapshotState
 import com.controid.protocol.LinkStatus
 import java.security.MessageDigest
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -54,6 +57,10 @@ interface EcosystemCommands {
     fun sendMouseButtons(mask: Int)
     fun sendKey(modifiers: Int, hidUsage: Int, pressed: Boolean, linuxKeycode: Int? = null)
     fun sendConsumer(usage: Int)
+    fun refreshDockApps(force: Boolean = false)
+    fun launchDockApp(desktopId: String, action: String = "activate")
+    fun setDockPinned(desktopId: String, pinned: Boolean)
+    fun sendDockSystemAction(action: String, value: String? = null)
 }
 
 object EcosystemStateHub {
@@ -62,6 +69,18 @@ object EcosystemStateHub {
 
     private val _clipboardHistory = MutableStateFlow<List<ClipboardEntry>>(emptyList())
     val clipboardHistory: StateFlow<List<ClipboardEntry>> = _clipboardHistory.asStateFlow()
+
+    private val _dockSnapshot = MutableStateFlow(DockSnapshotState())
+    val dockSnapshot: StateFlow<DockSnapshotState> = _dockSnapshot.asStateFlow()
+
+    private val _dockIcons = MutableStateFlow<Map<String, ImageBitmap>>(emptyMap())
+    val dockIcons: StateFlow<Map<String, ImageBitmap>> = _dockIcons.asStateFlow()
+
+    private val _dockFeedback = MutableStateFlow<DockLaunchFeedback?>(null)
+    val dockFeedback: StateFlow<DockLaunchFeedback?> = _dockFeedback.asStateFlow()
+
+    private val _dockSpectrum = MutableStateFlow(List(16) { 0 })
+    val dockSpectrum: StateFlow<List<Int>> = _dockSpectrum.asStateFlow()
 
     @Volatile
     private var commands: EcosystemCommands? = null
@@ -82,6 +101,22 @@ object EcosystemStateHub {
 
     internal fun updateClipboardHistory(entries: List<ClipboardEntry>) {
         _clipboardHistory.value = entries
+    }
+
+    internal fun updateDockSnapshot(transform: (DockSnapshotState) -> DockSnapshotState) {
+        _dockSnapshot.update(transform)
+    }
+
+    internal fun updateDockIcons(icons: Map<String, ImageBitmap>) {
+        _dockIcons.value = icons
+    }
+
+    internal fun emitDockFeedback(feedback: DockLaunchFeedback?) {
+        _dockFeedback.value = feedback
+    }
+
+    internal fun updateDockSpectrum(bars: List<Int>) {
+        _dockSpectrum.value = bars
     }
 
     fun setError(message: String?) {
@@ -137,6 +172,22 @@ object EcosystemStateHub {
 
     fun sendConsumer(usage: Int) {
         commands?.sendConsumer(usage)
+    }
+
+    fun refreshDockApps(force: Boolean = false) {
+        commands?.refreshDockApps(force)
+    }
+
+    fun launchDockApp(desktopId: String, action: String = "activate") {
+        commands?.launchDockApp(desktopId, action)
+    }
+
+    fun setDockPinned(desktopId: String, pinned: Boolean) {
+        commands?.setDockPinned(desktopId, pinned)
+    }
+
+    fun sendDockSystemAction(action: String, value: String? = null) {
+        commands?.sendDockSystemAction(action, value)
     }
 
     fun formatPublicKeyFingerprint(pubkey: ByteArray): String {

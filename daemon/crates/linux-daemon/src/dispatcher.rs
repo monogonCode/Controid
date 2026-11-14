@@ -1,9 +1,9 @@
 use crate::sender::PrioritySender;
 use bytes::BytesMut;
 use core_protocol::{
-    CHANNEL_CLIP_DATA, CHANNEL_CLIP_META, CHANNEL_CTRL, CHANNEL_FILES, CHANNEL_INPUT_FALLBACK,
-    CHANNEL_MEDIA_STREAM, ControlMessage, FLAG_ABORT, FLAG_END, FLAG_START, FlowController, Frame,
-    INITIAL_WINDOW_CREDITS, IdentityKeyPair, ProtocolCodec,
+    CHANNEL_CLIP_DATA, CHANNEL_CLIP_META, CHANNEL_CTRL, CHANNEL_DOCK, CHANNEL_FILES,
+    CHANNEL_INPUT_FALLBACK, CHANNEL_MEDIA_STREAM, ControlMessage, FLAG_ABORT, FLAG_END, FLAG_START,
+    FlowController, Frame, INITIAL_WINDOW_CREDITS, IdentityKeyPair, ProtocolCodec,
 };
 use futures::{SinkExt, StreamExt};
 use futures::stream::SplitStream;
@@ -30,6 +30,7 @@ pub struct ChannelRouter {
     pub media_tx: mpsc::Sender<Frame>,
     pub input_tx: mpsc::Sender<Frame>,
     pub files_tx: mpsc::Sender<Frame>,
+    pub dock_tx: mpsc::Sender<Frame>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -186,7 +187,7 @@ impl Dispatcher {
             CHANNEL_INPUT_FALLBACK if frame.stream_id == 0 && (frame.flags & (FLAG_START | FLAG_ABORT)) == 0 => {
                 self.dispatch_to_worker(frame);
             }
-            CHANNEL_CLIP_META | CHANNEL_CLIP_DATA | CHANNEL_MEDIA_STREAM | CHANNEL_INPUT_FALLBACK | CHANNEL_FILES => {
+            CHANNEL_CLIP_META | CHANNEL_CLIP_DATA | CHANNEL_MEDIA_STREAM | CHANNEL_INPUT_FALLBACK | CHANNEL_FILES | CHANNEL_DOCK => {
                 self.handle_stream_frame(frame, now);
             }
             other => {
@@ -439,6 +440,7 @@ impl Dispatcher {
             CHANNEL_MEDIA_STREAM => &self.router.media_tx,
             CHANNEL_INPUT_FALLBACK => &self.router.input_tx,
             CHANNEL_FILES => &self.router.files_tx,
+            CHANNEL_DOCK => &self.router.dock_tx,
             _ => return false,
         };
 
@@ -543,6 +545,7 @@ mod tests {
         media_rx: mpsc::Receiver<Frame>,
         input_rx: mpsc::Receiver<Frame>,
         files_rx: mpsc::Receiver<Frame>,
+        dock_rx: mpsc::Receiver<Frame>,
     }
 
     fn make_channels(cap: usize) -> TestChannels {
@@ -552,6 +555,7 @@ mod tests {
         let (media_tx, media_rx) = mpsc::channel(cap);
         let (input_tx, input_rx) = mpsc::channel(cap);
         let (files_tx, files_rx) = mpsc::channel(cap);
+        let (dock_tx, dock_rx) = mpsc::channel(cap);
         TestChannels {
             router: ChannelRouter {
                 ctrl_tx,
@@ -560,6 +564,7 @@ mod tests {
                 media_tx,
                 input_tx,
                 files_tx,
+                dock_tx,
             },
             ctrl_rx,
             clip_meta_rx,
@@ -567,6 +572,7 @@ mod tests {
             media_rx,
             input_rx,
             files_rx,
+            dock_rx,
         }
     }
 
@@ -775,6 +781,7 @@ mod tests {
         let (media_tx, _media_rx) = mpsc::channel(1); // intentionally un-drained!
         let (input_tx, _input_rx) = mpsc::channel(16);
         let (files_tx, _files_rx) = mpsc::channel(16);
+        let (dock_tx, _dock_rx) = mpsc::channel(16);
 
         let router = ChannelRouter {
             ctrl_tx,
@@ -783,6 +790,7 @@ mod tests {
             media_tx,
             input_tx,
             files_tx,
+            dock_tx,
         };
         let (sender, mut high_rx, _low_rx) = PrioritySender::channel(32, 16);
         let mut dispatcher = Dispatcher::new(router, sender);

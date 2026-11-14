@@ -14,6 +14,9 @@ import android.bluetooth.BluetoothProfile
 import android.bluetooth.le.AdvertiseCallback
 import android.bluetooth.le.AdvertiseData
 import android.bluetooth.le.AdvertiseSettings
+import android.bluetooth.le.AdvertisingSet
+import android.bluetooth.le.AdvertisingSetCallback
+import android.bluetooth.le.AdvertisingSetParameters
 import android.bluetooth.le.BluetoothLeAdvertiser
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -38,9 +41,12 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -84,7 +90,19 @@ class GattLinkServer(
     private var bluetoothManager: BluetoothManager? = null
     private var gattServer: BluetoothGattServer? = null
     private var advertiser: BluetoothLeAdvertiser? = null
+    private var currentAdvertisingSet: AdvertisingSet? = null
     private var linkStatusCharacteristic: BluetoothGattCharacteristic? = null
+
+    @Volatile
+    private var lastAdvertiseSuccessElapsedMs: Long = 0L
+
+    @Volatile
+    private var retryJob: Job? = null
+
+    @Volatile
+    private var watchdogJob: Job? = null
+
+    private var advertiseFailureStreak: Int = 0
 
     private val tetheringCallback = object : IRemoteTetheringCallback.Stub() {
         override fun onStatusChanged(statusCode: Int, detail: String?) {
@@ -104,11 +122,18 @@ class GattLinkServer(
 
     private val btStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(ctx: Context?, intent: Intent?) {
-            if (intent?.action != BluetoothAdapter.ACTION_STATE_CHANGED) return
+            val action = intent?.action ?: return
+            if (action != BluetoothAdapter.ACTION_STATE_CHANGED && action != ACTION_BLE_STATE_CHANGED) {
+                return
+            }
             val state = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)
             scope.launch(Dispatchers.IO) {
                 when (state) {
-                    BluetoothAdapter.STATE_ON -> if (started.get()) startServerAndAdvertising()
+                    BluetoothAdapter.STATE_ON,
+                    STATE_BLE_ON -> if (started.get()) {
+                        startServerAndAdvertising(forceRestartAdvertising = true)
+                    }
+
                     BluetoothAdapter.STATE_TURNING_OFF,
                     BluetoothAdapter.STATE_OFF -> stopServerAndAdvertising()
                 }
@@ -116,16 +141,98 @@ class GattLinkServer(
         }
     }
 
+    private val advertisingSetCallback = object : AdvertisingSetCallback() {
+        override fun onAdvertisingSetStarted(
+            advertisingSet: AdvertisingSet?,
+            txPower: Int,
+            status: Int
+        ) {
+            if (status == ADVERTISE_SUCCESS) {
+                synchronized(serverLock) {
+                    currentAdvertisingSet = advertisingSet
+                    advertiseFailureStreak = 0
+                }
+                lastAdvertiseSuccessElapsedMs = SystemClock.elapsedRealtime()
+                retryJob?.cancel()
+                retryJob = null
+                _bleActive.value = true
+                _lastError.value = null
+            } else {
+                synchronized(serverLock) {
+                    currentAdvertisingSet = null
+                    advertiseFailureStreak += 1
+                }
+                _bleActive.value = false
+                _lastError.value = "BLE advertise set failed (status=$status)"
+                Log.w(TAG, "BLE advertising set failed: status=$status")
+                if (status == ADVERTISE_FAILED_FEATURE_UNSUPPORTED) {
+                    scope.launch(Dispatchers.IO) {
+                        startLegacyAdvertisingInternal()
+                    }
+                } else {
+                    scheduleAdvertisingRetry()
+                }
+            }
+        }
+
+        override fun onAdvertisingEnabled(
+            advertisingSet: AdvertisingSet?,
+            enabled: Boolean,
+            status: Int
+        ) {
+            if (!started.get()) return
+            if (!enabled || status != ADVERTISE_SUCCESS) {
+                val isCurrent = synchronized(serverLock) {
+                    advertisingSet != null && advertisingSet === currentAdvertisingSet
+                }
+                if (isCurrent) {
+                    _bleActive.value = false
+                    Log.w(TAG, "BLE advertising disabled unexpectedly (enabled=$enabled status=$status)")
+                    scheduleAdvertisingRetry()
+                }
+            } else {
+                lastAdvertiseSuccessElapsedMs = SystemClock.elapsedRealtime()
+                _bleActive.value = true
+                _lastError.value = null
+            }
+        }
+
+        override fun onAdvertisingSetStopped(advertisingSet: AdvertisingSet?) {
+            val wasCurrent = synchronized(serverLock) {
+                val matched = advertisingSet != null && advertisingSet === currentAdvertisingSet
+                if (matched) {
+                    currentAdvertisingSet = null
+                }
+                matched
+            }
+            if (wasCurrent && started.get()) {
+                _bleActive.value = false
+                Log.w(TAG, "BLE advertising set stopped by controller; scheduling restart")
+                scheduleAdvertisingRetry()
+            }
+        }
+    }
+
     private val advertiseCallback = object : AdvertiseCallback() {
         override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
+            synchronized(serverLock) {
+                advertiseFailureStreak = 0
+            }
+            lastAdvertiseSuccessElapsedMs = SystemClock.elapsedRealtime()
+            retryJob?.cancel()
+            retryJob = null
             _bleActive.value = true
             _lastError.value = null
         }
 
         override fun onStartFailure(errorCode: Int) {
+            synchronized(serverLock) {
+                advertiseFailureStreak += 1
+            }
             _bleActive.value = false
             _lastError.value = "BLE advertise failed (code=$errorCode)"
             Log.w(TAG, "BLE advertising failed: $errorCode")
+            scheduleAdvertisingRetry()
         }
     }
 
@@ -142,6 +249,14 @@ class GattLinkServer(
 
                 BluetoothProfile.STATE_DISCONNECTED -> {
                     sessions.remove(addr)
+                    if (started.get() && sessions.isEmpty()) {
+                        scope.launch(Dispatchers.IO) {
+                            delay(350L)
+                            if (started.get() && sessions.isEmpty() && !_bleActive.value) {
+                                startAdvertisingInternal()
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -351,6 +466,7 @@ class GattLinkServer(
     fun start() {
         if (!started.compareAndSet(false, true)) return
         registerBluetoothReceiver()
+        startWatchdog()
         scope.launch(Dispatchers.IO) {
             startServerAndAdvertising()
         }
@@ -358,6 +474,10 @@ class GattLinkServer(
 
     fun stop() {
         if (!started.compareAndSet(true, false)) return
+        watchdogJob?.cancel()
+        watchdogJob = null
+        retryJob?.cancel()
+        retryJob = null
         unregisterBluetoothReceiver()
         stopServerAndAdvertising()
     }
@@ -365,7 +485,51 @@ class GattLinkServer(
     fun refreshPermissionsAndRestart() {
         if (!started.get()) return
         scope.launch(Dispatchers.IO) {
-            startServerAndAdvertising()
+            startServerAndAdvertising(forceRestartAdvertising = true)
+        }
+    }
+
+    private fun startWatchdog() {
+        watchdogJob?.cancel()
+        watchdogJob = scope.launch(Dispatchers.IO) {
+            while (isActive && started.get()) {
+                delay(WATCHDOG_INTERVAL_MS)
+                if (!started.get()) break
+                val adapter = bluetoothManager?.adapter
+                    ?: (appContext.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
+                if (adapter == null || !adapter.isEnabled || !hasConnectPermission() || !hasAdvertisePermission()) {
+                    continue
+                }
+                val hasGattService = synchronized(serverLock) {
+                    gattServer?.getService(SERVICE_UUID_OBJ) != null
+                }
+                val advAgeMs = if (lastAdvertiseSuccessElapsedMs > 0L) {
+                    SystemClock.elapsedRealtime() - lastAdvertiseSuccessElapsedMs
+                } else {
+                    Long.MAX_VALUE
+                }
+                val shouldRefreshAdv = !_bleActive.value ||
+                    (sessions.isEmpty() && advAgeMs >= ADVERTISE_REFRESH_INTERVAL_MS)
+                if (!hasGattService || shouldRefreshAdv) {
+                    startServerAndAdvertising(forceRestartAdvertising = shouldRefreshAdv)
+                }
+            }
+        }
+    }
+
+    private fun scheduleAdvertisingRetry() {
+        if (!started.get()) return
+        val delayMs = when (advertiseFailureStreak) {
+            0, 1 -> 2_000L
+            2 -> 5_000L
+            else -> 15_000L
+        }
+        retryJob?.cancel()
+        retryJob = scope.launch(Dispatchers.IO) {
+            delay(delayMs)
+            if (started.get()) {
+                startServerAndAdvertising(forceRestartAdvertising = true)
+            }
         }
     }
 
@@ -526,12 +690,23 @@ class GattLinkServer(
     }
 
     @SuppressLint("MissingPermission")
-    private fun startServerAndAdvertising() {
+    private fun startServerAndAdvertising(forceRestartAdvertising: Boolean = false) {
         synchronized(serverLock) {
             if (!started.get()) return
-            if (gattServer != null) {
-                startAdvertisingInternal()
+            val existing = gattServer
+            if (existing != null && hasConnectPermission() && runCatching { existing.getService(SERVICE_UUID_OBJ) != null }.getOrDefault(false)) {
+                if (forceRestartAdvertising || !_bleActive.value || currentAdvertisingSet == null) {
+                    startAdvertisingInternal()
+                }
                 return
+            }
+            if (existing != null) {
+                if (hasConnectPermission()) {
+                    runCatching { existing.clearServices() }
+                    runCatching { existing.close() }
+                }
+                gattServer = null
+                linkStatusCharacteristic = null
             }
 
             val manager = (appContext.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)
@@ -643,6 +818,50 @@ class GattLinkServer(
             }
 
             advertiser = leAdvertiser
+            val data = AdvertiseData.Builder()
+                .setIncludeDeviceName(false)
+                .addServiceUuid(ParcelUuid(SERVICE_UUID_OBJ))
+                .build()
+
+            val scanResponse = AdvertiseData.Builder()
+                .setIncludeDeviceName(true)
+                .build()
+
+            val setParams = AdvertisingSetParameters.Builder()
+                .setLegacyMode(true)
+                .setConnectable(true)
+                .setScannable(true)
+                .setInterval(AdvertisingSetParameters.INTERVAL_MEDIUM)
+                .setTxPowerLevel(AdvertisingSetParameters.TX_POWER_MEDIUM)
+                .build()
+
+            try {
+                currentAdvertisingSet = null
+                runCatching { leAdvertiser.stopAdvertisingSet(advertisingSetCallback) }
+                runCatching { leAdvertiser.stopAdvertising(advertiseCallback) }
+                leAdvertiser.startAdvertisingSet(setParams, data, scanResponse, null, null, advertisingSetCallback)
+            } catch (se: SecurityException) {
+                _bleActive.value = false
+                _lastError.value = "Missing BLUETOOTH_ADVERTISE permission"
+            } catch (t: Throwable) {
+                Log.w(TAG, "startAdvertisingSet failed (${t.message}); falling back to legacy startAdvertising")
+                startLegacyAdvertisingInternal()
+            }
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun startLegacyAdvertisingInternal() {
+        synchronized(serverLock) {
+            if (!started.get() || gattServer == null || !hasAdvertisePermission()) return
+            val adapter = bluetoothManager?.adapter ?: return
+            if (!adapter.isEnabled) {
+                _bleActive.value = false
+                return
+            }
+            val leAdvertiser = adapter.bluetoothLeAdvertiser ?: return
+            advertiser = leAdvertiser
+
             val settings = AdvertiseSettings.Builder()
                 .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_BALANCED)
                 .setConnectable(true)
@@ -668,6 +887,7 @@ class GattLinkServer(
             } catch (t: Throwable) {
                 _bleActive.value = false
                 _lastError.value = "BLE advertise error: ${t.message}"
+                scheduleAdvertisingRetry()
             }
         }
     }
@@ -677,9 +897,12 @@ class GattLinkServer(
         synchronized(serverLock) {
             _bleActive.value = false
             sessions.clear()
+            currentAdvertisingSet = null
+            lastAdvertiseSuccessElapsedMs = 0L
 
             advertiser?.let { adv ->
                 if (hasAdvertisePermission()) {
+                    runCatching { adv.stopAdvertisingSet(advertisingSetCallback) }
                     runCatching { adv.stopAdvertising(advertiseCallback) }
                 }
             }
@@ -712,7 +935,9 @@ class GattLinkServer(
 
     private fun registerBluetoothReceiver() {
         if (!receiverRegistered.compareAndSet(false, true)) return
-        val filter = IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED)
+        val filter = IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED).apply {
+            addAction(ACTION_BLE_STATE_CHANGED)
+        }
         ContextCompat.registerReceiver(
             appContext,
             btStateReceiver,
@@ -792,6 +1017,10 @@ class GattLinkServer(
         private const val AUTH_NONCE_TTL_MS = 30_000L
         private const val SHIZUKU_AWAIT_TIMEOUT_MS = 4_000L
         private const val MAX_PREPARED_WRITE_BYTES = 256
+        private const val WATCHDOG_INTERVAL_MS = 90_000L
+        private const val ADVERTISE_REFRESH_INTERVAL_MS = 300_000L
+        private const val ACTION_BLE_STATE_CHANGED = "android.bluetooth.adapter.action.BLE_STATE_CHANGED"
+        private const val STATE_BLE_ON = 15
 
         private val SERVICE_UUID_OBJ: UUID = UUID.fromString(BleConstants.SERVICE_UUID)
         private val CHAR_STATE_TRIGGER_UUID_OBJ: UUID = UUID.fromString(BleConstants.CHAR_STATE_TRIGGER_UUID)

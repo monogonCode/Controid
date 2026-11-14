@@ -14,6 +14,7 @@ pub const CHANNEL_MEDIA_STREAM: u8 = 0x03;
 pub const CHANNEL_INPUT_FALLBACK: u8 = 0x04;
 pub const CHANNEL_REMOTE_INPUT: u8 = 0x05;
 pub const CHANNEL_FILES: u8 = 0x06;
+pub const CHANNEL_DOCK: u8 = 0x07;
 
 pub const FLAG_START: u16 = 0x0001;
 pub const FLAG_END: u16 = 0x0002;

@@ -2,6 +2,7 @@ pub mod ble;
 pub mod clipboard_worker;
 pub mod config;
 pub mod dispatcher;
+pub mod dock_worker;
 pub mod files;
 pub mod ipc;
 pub mod network;

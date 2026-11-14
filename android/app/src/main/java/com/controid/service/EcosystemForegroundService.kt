@@ -24,6 +24,7 @@ import com.controid.R
 import com.controid.ble.GattLinkServer
 import com.controid.clipboard.ClipboardEntry
 import com.controid.clipboard.ClipboardSyncManager
+import com.controid.dock.DockController
 import com.controid.files.FileRpcController
 import com.controid.hid.BluetoothHidController
 import com.controid.protocol.AuthManager
@@ -75,6 +76,7 @@ class EcosystemForegroundService : Service() {
     private lateinit var clipboardSyncManager: ClipboardSyncManager
     private lateinit var screenCaptureController: ScreenCaptureController
     private lateinit var fileRpcController: FileRpcController
+    private lateinit var dockController: DockController
 
     @Volatile
     private var activeMultiplexer: Multiplexer? = null
@@ -171,6 +173,30 @@ class EcosystemForegroundService : Service() {
         override fun sendConsumer(usage: Int) {
             hidController.sendConsumer(usage)
         }
+
+        override fun refreshDockApps(force: Boolean) {
+            if (::dockController.isInitialized) {
+                dockController.requestRefresh(force)
+            }
+        }
+
+        override fun launchDockApp(desktopId: String, action: String) {
+            if (::dockController.isInitialized) {
+                dockController.launchApp(desktopId, action)
+            }
+        }
+
+        override fun setDockPinned(desktopId: String, pinned: Boolean) {
+            if (::dockController.isInitialized) {
+                dockController.setPinned(desktopId, pinned)
+            }
+        }
+
+        override fun sendDockSystemAction(action: String, value: String?) {
+            if (::dockController.isInitialized) {
+                dockController.sendSystemAction(action, value)
+            }
+        }
     }
 
     override fun onBind(intent: Intent?): IBinder = localBinder
@@ -228,6 +254,7 @@ class EcosystemForegroundService : Service() {
         )
         screenCaptureController = ScreenCaptureController(applicationContext, serviceScope)
         fileRpcController = FileRpcController(shizukuBridge, serviceScope)
+        dockController = DockController(applicationContext, serviceScope) { activeMultiplexer }
 
         EcosystemStateHub.registerCommands(commandsHandler)
         EcosystemStateHub.update { it.copy(serviceRunning = true, lastError = null) }
@@ -628,6 +655,10 @@ class EcosystemForegroundService : Service() {
                             fileRpcController.handleIncomingFrame(frame, mux)
                         }
 
+                        ProtocolConstants.CHANNEL_DOCK -> {
+                            dockController.handleIncomingFrame(frame, mux)
+                        }
+
                         else -> mux.recycle(frame)
                     }
                 }
@@ -635,6 +666,7 @@ class EcosystemForegroundService : Service() {
                 override suspend fun onStreamAborted(streamId: Int, reason: String) {
                     clipboardSyncManager.abortStream(streamId)
                     fileRpcController.abortStream(streamId)
+                    dockController.abortStream(streamId)
                 }
 
                 override suspend fun onDisconnected(error: Throwable?) {
@@ -644,6 +676,7 @@ class EcosystemForegroundService : Service() {
                         hidController.onTcpConnectionChanged(false)
                         screenCaptureController.stopStream()
                         fileRpcController.reset()
+                        dockController.reset()
                         EcosystemStateHub.update {
                             it.copy(
                                 tcpConnected = false,

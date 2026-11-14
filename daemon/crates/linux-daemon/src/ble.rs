@@ -3,8 +3,9 @@ use core_protocol::{IdentityKeyPair, LinkStatus};
 use futures::StreamExt;
 use std::collections::{BTreeMap, HashMap};
 use std::pin::Pin;
+use std::sync::OnceLock;
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, Sleep};
 use tracing::{debug, info, warn};
@@ -31,9 +32,16 @@ const DBUS_PROPS_IFACE: &str = "org.freedesktop.DBus.Properties";
 const DIRECT_CONNECT_TIMEOUT: Duration = Duration::from_secs(6);
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
 const SERVICES_RESOLVED_TIMEOUT: Duration = Duration::from_secs(6);
+const SERVICES_ALREADY_RESOLVED_GRACE: Duration = Duration::from_millis(1200);
 const LINK_STATUS_TIMEOUT: Duration = Duration::from_secs(25);
 const DISCONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const DBUS_CALL_TIMEOUT: Duration = Duration::from_secs(6);
+
+static BLE_OP_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn ble_op_lock() -> &'static Mutex<()> {
+    BLE_OP_LOCK.get_or_init(|| Mutex::new(()))
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscoveredDevice {
@@ -451,7 +459,15 @@ async fn wait_services_resolved(
         .build();
     let mut added_stream = MessageStream::for_match_rule(added_rule, conn, Some(64)).await?;
 
-    let deadline = Instant::now() + timeout_dur;
+    let already_resolved = get_device_prop::<bool>(conn, dev_path, "ServicesResolved")
+        .await
+        .unwrap_or(false);
+    let effective_timeout = if already_resolved {
+        timeout_dur.min(SERVICES_ALREADY_RESOLVED_GRACE)
+    } else {
+        timeout_dur
+    };
+    let deadline = Instant::now() + effective_timeout;
     let prefix = format!("{dev_path}/");
 
     loop {
@@ -461,6 +477,9 @@ async fn wait_services_resolved(
 
         let now = Instant::now();
         if now >= deadline {
+            if already_resolved {
+                bail!("BlueZ ServicesResolved=true without Controid GATT characteristics on {dev_path}");
+            }
             bail!("timed out waiting for Controid GATT characteristics on {dev_path}");
         }
         let step = (deadline - now).min(Duration::from_millis(350));
@@ -839,8 +858,10 @@ async fn resolve_and_connect_hybrid(
         }
     }
 
+    // Allow LE discovery to also re-discover trimmed_mac (with cleared/updated beacon state)
+    // in case direct connect hit a stale BlueZ cache or transient disconnect.
     let (dev_path, active_mac, paired) =
-        discover_first_matching_device(conn, service_uuid, DISCOVERY_TIMEOUT, skip_mac).await?;
+        discover_first_matching_device(conn, service_uuid, DISCOVERY_TIMEOUT, None).await?;
     info!(mac = %active_mac, path = %dev_path, paired, "discovered Controid BLE device");
 
     let chars = try_connect_and_resolve(conn, &dev_path, DIRECT_CONNECT_TIMEOUT).await?;
@@ -913,6 +934,7 @@ pub async fn trigger_hotspot_and_wait(
     service_uuid: &str,
     signer: &IdentityKeyPair,
 ) -> Result<(String, bool)> {
+    let _ble_guard = ble_op_lock().lock().await;
     let (dev_path, active_mac, active_paired, chars) =
         resolve_and_connect_hybrid(conn, mac, service_uuid).await?;
 
@@ -1048,6 +1070,7 @@ pub async fn stop_hotspot(
     service_uuid: &str,
     signer: &IdentityKeyPair,
 ) -> Result<()> {
+    let _ble_guard = ble_op_lock().lock().await;
     let (dev_path, _active_mac, _paired, chars) =
         resolve_and_connect_hybrid(conn, mac, service_uuid).await?;
 
@@ -1067,6 +1090,7 @@ pub async fn discover_controid_devices(
     service_uuid: &str,
     timeout_secs: u64,
 ) -> Result<Vec<DiscoveredDevice>> {
+    let _ble_guard = ble_op_lock().lock().await;
     let objects = get_managed_objects(conn).await?;
     let adapter_path = find_adapter(&objects)?;
     let adapter_prefix = format!("{}/", adapter_path.as_str());

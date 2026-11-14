@@ -11,6 +11,7 @@ import android.os.Bundle
 import android.os.IBinder
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import com.controid.service.EcosystemForegroundService
@@ -44,12 +45,16 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private var skipNextOnStartRefresh = false
+
     override fun onCreate(savedInstanceState: Bundle?) {
+        enableEdgeToEdge()
         super.onCreate(savedInstanceState)
 
         val missing = missingRuntimePermissions()
         if (hasConnectedDevicePermissions()) {
-            startAndBindEcosystemService(refreshPermissions = false)
+            skipNextOnStartRefresh = true
+            startAndBindEcosystemService(refreshPermissions = true)
         }
         if (missing.isNotEmpty()) {
             permissionLauncher.launch(missing.toTypedArray())
@@ -57,6 +62,17 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             ControidApp()
+        }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        if (skipNextOnStartRefresh) {
+            skipNextOnStartRefresh = false
+            return
+        }
+        if (hasConnectedDevicePermissions()) {
+            startAndBindEcosystemService(refreshPermissions = true)
         }
     }
 

@@ -17,3 +17,6 @@ Cargo.lock
 *.tmp
 *.sock
 .DS_Store
+
+# Presentation Website (excluded from source repo)
+/web/

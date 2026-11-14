@@ -43,6 +43,17 @@ pub const FS_OP_UNLINK: u8 = 0x09;
 pub const FS_OP_RMDIR: u8 = 0x0A;
 pub const FS_OP_RENAME: u8 = 0x0B;
 
+pub const DOCK_LIST_REQ: u8 = 0x01;
+pub const DOCK_ICON_REQ: u8 = 0x02;
+pub const DOCK_LAUNCH_REQ: u8 = 0x03;
+pub const DOCK_PIN_SET: u8 = 0x04;
+pub const DOCK_SYSTEM_ACTION: u8 = 0x05;
+pub const DOCK_SNAPSHOT: u8 = 0x81;
+pub const DOCK_ICON_RESP: u8 = 0x82;
+pub const DOCK_LAUNCH_ACK: u8 = 0x83;
+pub const DOCK_RUNTIME_UPDATE: u8 = 0x84;
+pub const DOCK_MEDIA_SPECTRUM: u8 = 0x85;
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum MessageError {
     #[error("invalid control message length")]

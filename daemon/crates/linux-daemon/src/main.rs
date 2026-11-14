@@ -17,6 +17,7 @@ use linux_daemon::clipboard_worker::{
 };
 use linux_daemon::config::AppConfig;
 use linux_daemon::dispatcher::{ChannelRouter, Dispatcher, perform_l7_handshake};
+use linux_daemon::dock_worker::DockWorker;
 use linux_daemon::files::{self, FilesHandle, default_files_socket_path};
 use linux_daemon::ipc::{IpcEvent, default_socket_path, start_ipc_server};
 use linux_daemon::network;
@@ -88,6 +89,7 @@ struct ActiveSession {
     clipboard_handle: JoinHandle<()>,
     media_handle: JoinHandle<()>,
     input_handle: JoinHandle<()>,
+    dock_handle: JoinHandle<()>,
 }
 
 impl ActiveSession {
@@ -117,6 +119,7 @@ impl ActiveSession {
         self.emitter_handle.abort();
         self.dispatcher_handle.abort();
         self.input_handle.abort();
+        self.dock_handle.abort();
     }
 }
 
@@ -157,6 +160,7 @@ struct DaemonRuntime {
     hid_watch_active: bool,
     connect_task: Option<JoinHandle<()>>,
     connect_rx: Option<mpsc::Receiver<ConnectOutcome>>,
+    connect_force_hotspot: bool,
     active_session: Option<ActiveSession>,
     retry_count: u32,
     retry_sleep: Option<Pin<Box<Sleep>>>,
@@ -195,6 +199,7 @@ impl DaemonRuntime {
             handle.abort();
         }
         self.connect_rx = None;
+        self.connect_force_hotspot = false;
         self.retry_sleep = None;
     }
 
@@ -202,6 +207,7 @@ impl DaemonRuntime {
         if self.active_session.is_some() || self.connect_task.is_some() {
             return;
         }
+        self.connect_force_hotspot = force_hotspot;
         self.retry_sleep = None;
         let initial_state = if !force_hotspot
             && self.config.network.normalized_connection_mode() != "hotspot"
@@ -281,6 +287,7 @@ impl DaemonRuntime {
             );
             self.retry_count = 0;
             self.retry_sleep = None;
+            self.connect_force_hotspot = false;
             self.set_state(DaemonLinkState::Idle);
             if let Some(ref session_dbus) = self.session_dbus {
                 notify::notify_fire_and_forget(
@@ -355,6 +362,7 @@ impl DaemonRuntime {
         let (clip_data_tx, clip_data_rx) = mpsc::channel(64);
         let (media_tx, media_rx) = mpsc::channel(128);
         let (input_tx, input_rx) = mpsc::channel(64);
+        let (dock_tx, dock_rx) = mpsc::channel(32);
 
         let (local_clip_tx, local_clip_rx) = mpsc::channel(16);
         let (manual_clip_tx, manual_clip_rx) = mpsc::channel(16);
@@ -368,6 +376,7 @@ impl DaemonRuntime {
             media_tx,
             input_tx,
             files_tx: self.files.files_tx.clone(),
+            dock_tx,
         };
 
         let emitter_end_tx = session_end_tx.clone();
@@ -422,9 +431,15 @@ impl DaemonRuntime {
 
         let input_compositor = Arc::clone(&self.compositor);
         let input_hid_rx = self.hid_rx.clone();
-        let input_shutdown = shutdown_rx;
+        let input_shutdown = shutdown_rx.clone();
         let input_handle = tokio::spawn(async move {
             run_input_worker(input_rx, input_compositor, input_hid_rx, input_shutdown).await;
+        });
+
+        let dock_worker = DockWorker::new(sender.clone());
+        let dock_shutdown = shutdown_rx;
+        let dock_handle = tokio::spawn(async move {
+            dock_worker.run(dock_rx, dock_shutdown).await;
         });
 
         self.active_session = Some(ActiveSession {
@@ -444,6 +459,7 @@ impl DaemonRuntime {
             clipboard_handle,
             media_handle,
             input_handle,
+            dock_handle,
         });
 
         self.telemetry.tethering = true;
@@ -483,14 +499,27 @@ impl DaemonRuntime {
     async fn handle_command(&mut self, cmd: DaemonCommand) {
         match cmd {
             DaemonCommand::EnableHotspot { reply } => {
-                if self.telemetry.state == DaemonLinkState::Connected {
-                    let _ = reply.send(Ok(json!({ "status": "connected" })));
+                if self.telemetry.state == DaemonLinkState::Connected && self.telemetry.tethering {
+                    let _ = reply.send(Ok(json!({ "status": "connected", "tethering": true })));
                     return;
                 }
-                if self.connect_task.is_some() {
+                if self.connect_task.is_some() && self.connect_force_hotspot {
                     let _ = reply.send(Ok(json!({ "status": "starting" })));
                     return;
                 }
+                if self.config.device.hotspot_ssid.trim().is_empty() {
+                    let _ = reply.send(Err(CommandError::new(
+                        4001,
+                        "device.hotspot_ssid is empty; configure the phone hotspot SSID first",
+                    )));
+                    return;
+                }
+                if let Some(session) = self.active_session.take() {
+                    session.teardown(false).await;
+                }
+                self.files.set_connected(None).await;
+                self.cancel_connect_and_backoff();
+                self.set_state(DaemonLinkState::Idle);
                 self.retry_count = 0;
                 self.last_error = None;
                 self.start_connect_pipeline(true);
@@ -1429,6 +1458,7 @@ async fn main() -> Result<()> {
         hid_watch_active: true,
         connect_task: None,
         connect_rx: None,
+        connect_force_hotspot: false,
         active_session: None,
         retry_count: 0,
         retry_sleep: None,
@@ -1563,6 +1593,7 @@ async fn main() -> Result<()> {
                     Some(ConnectOutcome::Connected { framed, verified_peer_pubkey }) => {
                         runtime.connect_task = None;
                         runtime.connect_rx = None;
+                        runtime.connect_force_hotspot = false;
                         runtime.install_active_session(framed, verified_peer_pubkey).await;
                     }
                     Some(ConnectOutcome::Failed { err, tethering_code }) => {
@@ -1597,7 +1628,7 @@ async fn main() -> Result<()> {
             _ = retry_fut => {
                 runtime.retry_sleep = None;
                 if runtime.telemetry.state == DaemonLinkState::Idle {
-                    runtime.start_connect_pipeline(false);
+                    runtime.start_connect_pipeline(runtime.connect_force_hotspot);
                 }
             }
 

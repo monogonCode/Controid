@@ -5,6 +5,7 @@ import com.controid.protocol.LinkStatus
 import com.controid.service.ShizukuState
 
 enum class ControidTab(val title: String) {
+    DOCK("Dock"),
     DASHBOARD("Dashboard"),
     TRACKPAD("Trackpad"),
     CLIPBOARD("Clipboard")

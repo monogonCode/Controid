@@ -7,7 +7,8 @@
 <p align="center">
   <strong>Conecta tu móvil Android con tu PC Linux de forma nativa, privada y sin cables.</strong><br/>
   Portapapeles compartido (texto e imágenes), pantalla interactiva, trackpad/teclado Bluetooth y archivos del móvil montados como carpeta local.
-</p>
+<p align="center"> controid.monogoncode.dev</p></p>
+<p ali
 
 ---
 

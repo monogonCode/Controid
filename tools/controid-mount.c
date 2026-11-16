@@ -457,8 +457,9 @@ static int dc_readdir(
         return -EIO;
     }
 
-    filler(buf, ".", NULL, 0, FUSE_FILL_DIR_DEFAULTS);
-    filler(buf, "..", NULL, 0, FUSE_FILL_DIR_DEFAULTS);
+    /* Pass 0 instead of FUSE_FILL_DIR_DEFAULTS for libfuse < 3.15 (e.g. Debian 12 / Ubuntu 24.04). */
+    filler(buf, ".", NULL, 0, (enum fuse_fill_dir_flags)0);
+    filler(buf, "..", NULL, 0, (enum fuse_fill_dir_flags)0);
 
     char name_buf[4096];
     for (uint32_t i = 0; i < count; ++i) {

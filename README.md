@@ -60,15 +60,17 @@ Controid conecta tu teléfono Android y tu PC Linux directamente en tu red local
   - **Opcionales recomendados:** `wl-clipboard` / `xclip`, `playerctl` (controles MPRIS), `cava` (espectro de audio en tiempo real en el Dock), `rsvg-convert` o `magick` (renderizado de iconos SVG para apps del Dock), `mpv` (visor fallback).
 
 <details>
-<summary><strong>Instalar dependencias según tu distribución</strong></summary>
+<summary><strong>Instalar dependencias manualmente según tu distribución (opcional, <code>./install.sh --pc</code> lo hace automático)</strong></summary>
+
+> Nota: `controidd` requiere **Rust >= 1.85** (Edition 2024). Si tu distribución incluye una versión más antigua, `./install.sh --pc` instalará `rustup` automáticamente.
 
 #### Arch Linux / EndeavourOS / CachyOS
 ```bash
 sudo pacman -S --needed \
-  rustup gcc pkgconf \
+  rustup base-devel pkgconf \
   systemd-libs fuse3 sdl2 ffmpeg \
-  python-gobject gtk4 libadwaita \
-  wl-clipboard bluez bluez-utils networkmanager \
+  python-gobject python-cairo gtk4 libadwaita \
+  wl-clipboard xclip bluez bluez-utils networkmanager \
   playerctl cava librsvg
 ```
 *(Si acabas de instalar `rustup`, ejecuta `rustup default stable`.)*
@@ -76,33 +78,34 @@ sudo pacman -S --needed \
 #### Ubuntu / Debian / Pop!_OS
 ```bash
 sudo apt update && sudo apt install -y \
-  build-essential pkg-config cargo rustc \
+  build-essential pkg-config curl ca-certificates \
   libudev-dev libfuse3-dev fuse3 libsdl2-dev \
   libavcodec-dev libswscale-dev libavutil-dev \
-  python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 \
-  wl-clipboard bluez network-manager \
+  python3-gi python3-gi-cairo gir1.2-gtk-4.0 gir1.2-adw-1 \
+  wl-clipboard xclip bluez network-manager \
   playerctl librsvg2-bin
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
 ```
 
 #### Fedora
 ```bash
 sudo dnf install -y \
-  gcc pkgconf-pkg-config cargo rust \
+  gcc pkgconf-pkg-config curl \
   systemd-devel fuse3 fuse3-devel SDL2-devel \
   ffmpeg-free-devel \
-  python3-gobject gtk4 libadwaita \
-  wl-clipboard bluez NetworkManager \
+  python3-gobject python3-cairo gtk4 libadwaita \
+  wl-clipboard xclip bluez NetworkManager \
   playerctl librsvg2-tools
 ```
-*(En Fedora, habilita RPM Fusion si necesitas soporte completo de FFmpeg H.264/H.265.)*
+*(En Fedora, habilita RPM Fusion si necesitas soporte completo de FFmpeg H.264/H.265, y usa `rustup` si `rustc` es menor a 1.85.)*
 
 #### openSUSE (Tumbleweed / Leap)
 ```bash
 sudo zypper install -y \
-  gcc pkg-config cargo rust \
+  gcc pkg-config curl \
   libudev-devel fuse3 fuse3-devel libSDL2-devel \
-  ffmpeg-6-libavcodec-devel ffmpeg-6-libswscale-devel ffmpeg-6-libavutil-devel \
-  python3-gobject typelib-1_0-Gtk-4_0 typelib-1_0-Adw-1 \
+  libavcodec-devel libswscale-devel libavutil-devel \
+  python3-gobject python3-cairo typelib-1_0-Gtk-4_0 typelib-1_0-Adw-1 \
   wl-clipboard xclip bluez NetworkManager \
   playerctl rsvg-convert
 ```
@@ -110,9 +113,9 @@ sudo zypper install -y \
 #### Void Linux (runit)
 ```bash
 sudo xbps-install -Sy \
-  base-devel pkg-config cargo rust \
+  base-devel pkg-config curl \
   eudev-libudev-devel fuse3 fuse3-devel SDL2-devel ffmpeg6-devel \
-  python3-gobject gtk4 libadwaita \
+  python3-gobject python3-cairo gtk4 libadwaita \
   wl-clipboard xclip bluez NetworkManager \
   playerctl librsvg-utils
 ```
@@ -122,7 +125,7 @@ sudo xbps-install -Sy \
 sudo apk add \
   build-base pkgconf cargo rust \
   eudev-dev fuse3 fuse3-dev sdl2-dev ffmpeg-dev \
-  py3-gobject3 gtk4.0 libadwaita \
+  py3-gobject3 py3-cairo gtk4.0 libadwaita \
   wl-clipboard xclip bluez networkmanager \
   playerctl rsvg-convert
 ```
@@ -138,38 +141,62 @@ sudo systemctl enable --now bluetooth NetworkManager
 
 ## Guía de instalación
 
-### Paso 1: Descargar e instalar en Linux
-Clona el repositorio y ejecuta `./install.sh` **como usuario normal** (nunca con `sudo`):
+La instalación del **PC Linux** y la de **Android** están separadas para que no necesites Android SDK, Java ni Gradle si solo quieres instalar el programa en el ordenador o usar el APK precompilado.
+
+### Paso 1: Instalar en PC Linux (`--pc`)
+Clona el repositorio y ejecuta `./install.sh --pc` (o simplemente `./install.sh`) **como usuario normal** (nunca con `sudo`; el instalador detecta tu distribución e instala automáticamente las dependencias del sistema y Rust):
 
 ```bash
 git clone https://github.com/monogonCode/Controid.git
 cd Controid
-./install.sh --setup-uinput
+./install.sh --pc
 ```
 
-Opciones útiles de `./install.sh`:
+Modos y opciones útiles de `./install.sh`:
+- `--pc` *(por defecto)*: instala solo el programa de PC Linux (binarios, GUI, iconos y servicio), sin dependencias de Android.
+- `--android`: descarga el APK precompilado oficial (sin compilar ni requerir Android SDK) y lo instala por ADB en el móvil conectado.
+- `--all`: instala tanto el programa de PC como la app Android (`--pc` + `--android`).
 - `--setup-uinput`: configura `/etc/udev/rules.d/99-controid-uinput.rules` y añade tu usuario al grupo `input` para usar el trackpad/teclado por red si no usas Bluetooth HID *(puede requerir cerrar e iniciar sesión una vez)*.
 - `--xdg-autostart`: crea `~/.config/autostart/controidd.desktop` en sistemas o sesiones sin `systemd`.
 - `--no-systemd`: instala los binarios sin ejecutar `systemctl --user`.
+- `--no-deps`: omite la instalación automática de paquetes del sistema.
 - `--pair`: ejecuta `controid pair` automáticamente al terminar.
+- `-y, --yes`: acepta confirmaciones automáticamente.
 - `--offline`: compila con `cargo --offline`.
 
 Los ejecutables se instalan en `~/.local/bin/`:
 `controidd` (demonio), `controid` (CLI), `controid-gui` (interfaz gráfica), `controid-viewer` (visor de pantalla), `controid-mount` (FUSE3) y `controid-tray` (bandeja).
 
-> Si `~/.local/bin` no está en tu `PATH`, añade a `~/.bashrc` o `~/.zshrc`:
+> Si `~/.local/bin` no está en tu `PATH`, el instalador te ofrecerá añadirlo a `~/.bashrc` / `~/.zshrc`:
 > ```bash
 > export PATH="$HOME/.local/bin:$PATH"
 > ```
 
-### Paso 2: Compilar e instalar la app en Android
-Con **Android SDK** y **ADB** listos (y *Depuración USB* o *Depuración inalámbrica* activa en tu móvil):
+### Paso 2: Instalar la app en Android (APK precompilado)
+No necesitas compilar nada ni instalar Android SDK:
+
+- **Opción recomendada (directa en el móvil):** descarga e instala el APK precompilado desde la web del proyecto:
+  👉 **[https://controid.monogoncode.dev/downloads/controid.apk](https://controid.monogoncode.dev/downloads/controid.apk)**
+- **Opción desde el PC por USB/ADB:** con *Depuración USB* activa en tu móvil, ejecuta:
+  ```bash
+  ./install.sh --android
+  ```
+  *(O `./install.sh --all` para instalar PC + Android en un solo paso.)*
+
+<details>
+<summary><strong>Solo desarrolladores: compilar el APK desde fuente</strong></summary>
+
+Si modificas el código en `android/` y quieres compilar el APK con **JDK 17+** y **Android SDK**:
 
 ```bash
+./install.sh --android --build-apk
+# O manualmente:
 cd android
 ./gradlew assembleDebug
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
+
+</details>
 
 ### Paso 3: Activar permisos en el móvil
 1. Abre **Shizuku** y comprueba que indique **"Shizuku está en ejecución"**.

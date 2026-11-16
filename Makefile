@@ -3,7 +3,7 @@ CC ?= gcc
 CARGO := cargo --manifest-path daemon/Cargo.toml
 TOOLS_OUT_DIR := daemon/target/tools
 
-.PHONY: all check test clippy fmt build-daemon build-tools build-android install-icons install-gui install-systemd install-autostart clean
+.PHONY: all check test clippy fmt build-daemon build-tools build-android sync-web-apk build-web deploy-web install-icons install-gui install-systemd install-autostart clean
 
 all: check test
 
@@ -29,6 +29,27 @@ build-tools:
 
 build-android:
 	cd android && ./gradlew assembleDebug
+
+sync-web-apk:
+	./web/sync-apk.sh
+
+build-web: sync-web-apk
+	@if command -v podman >/dev/null 2>&1; then \
+		FUSE_BIN="$$(command -v fuse-overlayfs || true)"; \
+		if [ -n "$$FUSE_BIN" ] && [ "$$(id -u)" -ne 0 ]; then \
+			podman build --no-cache --storage-opt "overlay.mount_program=$$FUSE_BIN" -t localhost/controid-web:latest -f web/Containerfile web; \
+		else \
+			podman build --no-cache -t localhost/controid-web:latest -f web/Containerfile web; \
+		fi; \
+	elif command -v docker >/dev/null 2>&1; then \
+		docker build --no-cache -t controid-web:latest -f web/Containerfile web; \
+	else \
+		echo "Error: se requiere podman o docker para construir la imagen web." >&2; \
+		exit 1; \
+	fi
+
+deploy-web:
+	./deploy.sh
 
 install-icons:
 	@for size in 32x32 48x48 64x64 128x128 256x256 512x512; do \

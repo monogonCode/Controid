@@ -38,7 +38,10 @@ import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowLeft
+import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.outlined.OpenInNew
 import androidx.compose.material.icons.automirrored.outlined.VolumeDown
 import androidx.compose.material.icons.automirrored.outlined.VolumeOff
@@ -70,6 +73,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -131,7 +135,7 @@ fun DockScreen(
 
     var searchQuery by rememberSaveable { mutableStateOf("") }
     var selectedCategory by rememberSaveable { mutableStateOf(DockCategoryFilter.ALL) }
-    var actionTargetApp by remember { mutableStateOf<DockAppItem?>(null) }
+    var actionTargetAppId by remember { mutableStateOf<String?>(null) }
     var visibleFeedback by remember { mutableStateOf<DockLaunchFeedback?>(null) }
 
     // Live clock ticker for the SekaiPop header pill
@@ -167,9 +171,16 @@ fun DockScreen(
     }
 
     val pinnedSet = remember(dockSnapshot.pinnedIds) { dockSnapshot.pinnedIds.toSet() }
+    val pinnedOrderMap = remember(dockSnapshot.pinnedIds) {
+        dockSnapshot.pinnedIds.withIndex().associate { (index, id) -> id to index }
+    }
     val frequentSet = remember(dockSnapshot.frequentIds) { dockSnapshot.frequentIds.toSet() }
+    val appsById = remember(dockSnapshot.apps) { dockSnapshot.apps.associateBy { it.id } }
+    val actionTargetApp = remember(actionTargetAppId, appsById) {
+        actionTargetAppId?.let { appsById[it] }
+    }
 
-    val filteredApps = remember(dockSnapshot.apps, searchQuery, selectedCategory, pinnedSet, frequentSet) {
+    val filteredApps = remember(dockSnapshot.apps, searchQuery, selectedCategory, pinnedSet, pinnedOrderMap, frequentSet) {
         val query = searchQuery.trim()
         dockSnapshot.apps
             .asSequence()
@@ -185,23 +196,19 @@ fun DockScreen(
                 }
             }
             .sortedWith(
-                compareByDescending<DockAppItem> { it.focused }
-                    .thenByDescending { it.runningCount > 0 }
-                    .thenByDescending { it.id in pinnedSet }
-                    .thenByDescending { it.launchCount }
+                compareBy<DockAppItem> { pinnedOrderMap[it.id] ?: Int.MAX_VALUE }
                     .thenBy { it.name.lowercase(Locale.ROOT) }
+                    .thenBy { it.id }
             )
             .toList()
     }
 
-    // Sticky Quick Dock apps: pinned in user order + running unpinned apps
-    val quickDockApps = remember(dockSnapshot.apps, dockSnapshot.pinnedIds) {
-        val byId = dockSnapshot.apps.associateBy { it.id }
-        val pinnedOrdered = dockSnapshot.pinnedIds.mapNotNull { byId[it] }
-        val pinnedLookup = dockSnapshot.pinnedIds.toSet()
+    // Sticky Quick Dock apps: pinned in user order + running unpinned apps (stable alphabetical order)
+    val quickDockApps = remember(dockSnapshot.apps, dockSnapshot.pinnedIds, appsById, pinnedSet) {
+        val pinnedOrdered = dockSnapshot.pinnedIds.mapNotNull { appsById[it] }
         val runningUnpinned = dockSnapshot.apps
-            .filter { it.runningCount > 0 && it.id !in pinnedLookup }
-            .sortedWith(compareByDescending<DockAppItem> { it.focused }.thenBy { it.name.lowercase(Locale.ROOT) })
+            .filter { it.runningCount > 0 && it.id !in pinnedSet }
+            .sortedWith(compareBy<DockAppItem> { it.name.lowercase(Locale.ROOT) }.thenBy { it.id })
         val combined = pinnedOrdered + runningUnpinned
         if (combined.isNotEmpty()) combined else dockSnapshot.apps.take(8)
     }
@@ -247,7 +254,7 @@ fun DockScreen(
                     onOpenTheme = onOpenTheme,
                     onOpenDashboard = onOpenDashboard,
                     onTapApp = { app -> launchAppAction(app, null) },
-                    onLongPressApp = { app -> actionTargetApp = app }
+                    onLongPressApp = { app -> actionTargetAppId = app.id }
                 )
             } else {
                 PortraitDockLayout(
@@ -275,7 +282,7 @@ fun DockScreen(
                     onOpenTheme = onOpenTheme,
                     onOpenDashboard = onOpenDashboard,
                     onTapApp = { app -> launchAppAction(app, null) },
-                    onLongPressApp = { app -> actionTargetApp = app }
+                    onLongPressApp = { app -> actionTargetAppId = app.id }
                 )
             }
         }
@@ -336,29 +343,35 @@ fun DockScreen(
         }
     }
 
-    // Long-press app actions dialog
+    // Long-press app actions & pin-position dialog
     actionTargetApp?.let { target ->
-        val isPinned = target.id in pinnedSet
+        val currentPinnedIds = dockSnapshot.pinnedIds
+        val currentPinIndex = currentPinnedIds.indexOf(target.id)
         DockAppActionDialog(
             app = target,
             icon = dockIcons[target.id],
             theme = theme,
-            isPinned = isPinned,
-            onDismiss = { actionTargetApp = null },
+            pinnedIds = currentPinnedIds,
+            appsById = appsById,
+            currentPinIndex = currentPinIndex,
+            onDismiss = { actionTargetAppId = null },
             onActivate = {
-                actionTargetApp = null
+                actionTargetAppId = null
                 launchAppAction(target, "activate")
             },
             onNewWindow = {
-                actionTargetApp = null
+                actionTargetAppId = null
                 launchAppAction(target, "new_window")
             },
-            onTogglePin = {
-                actionTargetApp = null
-                EcosystemStateHub.setDockPinned(target.id, !isPinned)
+            onPinAt = { targetIndex ->
+                val updated = insertPinnedAt(currentPinnedIds, target.id, targetIndex)
+                EcosystemStateHub.setDockPinnedOrder(updated)
+            },
+            onUnpin = {
+                EcosystemStateHub.setDockPinned(target.id, false)
             },
             onCloseApp = {
-                actionTargetApp = null
+                actionTargetAppId = null
                 launchAppAction(target, "close")
             }
         )
@@ -1638,18 +1651,39 @@ private fun EmptyCatalogCard(
     }
 }
 
+private fun insertPinnedAt(currentIds: List<String>, appId: String, targetIndex: Int): List<String> {
+    val mutable = currentIds.filterNot { it == appId }.toMutableList()
+    val clampedIndex = targetIndex.coerceIn(0, mutable.size)
+    mutable.add(clampedIndex, appId)
+    return mutable
+}
+
 @Composable
 private fun DockAppActionDialog(
     app: DockAppItem,
     icon: ImageBitmap?,
     theme: SekaiResolvedTheme,
-    isPinned: Boolean,
+    pinnedIds: List<String>,
+    appsById: Map<String, DockAppItem>,
+    currentPinIndex: Int,
     onDismiss: () -> Unit,
     onActivate: () -> Unit,
     onNewWindow: () -> Unit,
-    onTogglePin: () -> Unit,
+    onPinAt: (Int) -> Unit,
+    onUnpin: () -> Unit,
     onCloseApp: () -> Unit
 ) {
+    val isPinned = currentPinIndex >= 0
+    val maxSlot = if (isPinned) (pinnedIds.size - 1).coerceAtLeast(0) else pinnedIds.size
+    var pendingSlot by remember(app.id, isPinned, pinnedIds.size) {
+        mutableIntStateOf(if (isPinned) currentPinIndex else pinnedIds.size)
+    }
+    if (isPinned) {
+        pendingSlot = currentPinIndex
+    } else if (pendingSlot > maxSlot) {
+        pendingSlot = maxSlot
+    }
+
     Dialog(onDismissRequest = onDismiss) {
         SekaiPlate(
             theme = theme,
@@ -1661,6 +1695,7 @@ private fun DockAppActionDialog(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
                     .padding(18.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
@@ -1683,15 +1718,21 @@ private fun DockAppActionDialog(
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
-                        Text(
-                            text = if (app.runningCount > 0) {
-                                "${app.runningCount} ventana(s) activa(s)"
+                        val subtitle = buildString {
+                            if (isPinned) {
+                                append("Fijada #${currentPinIndex + 1} de ${pinnedIds.size}")
                             } else {
-                                app.genericName ?: app.id
-                            },
-                            color = theme.inkSub,
+                                append(app.genericName ?: app.id)
+                            }
+                            if (app.runningCount > 0) {
+                                append(" · ${app.runningCount} ventana(s)")
+                            }
+                        }
+                        Text(
+                            text = subtitle,
+                            color = if (isPinned) theme.pinkAccent else theme.inkSub,
                             fontSize = 12.sp,
-                            fontWeight = FontWeight.SemiBold,
+                            fontWeight = FontWeight.Bold,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
@@ -1712,13 +1753,112 @@ private fun DockAppActionDialog(
                     fill = theme.surfaceHover,
                     onClick = onNewWindow
                 )
-                ActionSheetRowButton(
+
+                // Pin slot location selector
+                SekaiPlate(
                     theme = theme,
-                    icon = Icons.Outlined.PushPin,
-                    label = if (isPinned) "Quitar de Fijadas" else "Fijar en Acceso Rápido",
-                    fill = if (isPinned) theme.pinkAccent else theme.accentB,
-                    onClick = onTogglePin
-                )
+                    cornerRadius = 16.dp,
+                    shadowOffset = 2.dp,
+                    fillColor = theme.surfaceHover,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = if (isPinned) "Ubicación en el Dock" else "Elegir ubicación al fijar",
+                                color = theme.ink,
+                                fontSize = 12.5.sp,
+                                fontWeight = FontWeight.Black
+                            )
+                            if (isPinned) {
+                                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    PinMoveStepButton(
+                                        theme = theme,
+                                        icon = Icons.AutoMirrored.Outlined.KeyboardArrowLeft,
+                                        enabled = currentPinIndex > 0,
+                                        onClick = { onPinAt((currentPinIndex - 1).coerceAtLeast(0)) }
+                                    )
+                                    PinMoveStepButton(
+                                        theme = theme,
+                                        icon = Icons.AutoMirrored.Outlined.KeyboardArrowRight,
+                                        enabled = currentPinIndex < pinnedIds.lastIndex,
+                                        onClick = { onPinAt((currentPinIndex + 1).coerceAtMost(pinnedIds.lastIndex)) }
+                                    )
+                                }
+                            }
+                        }
+
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            for (slot in 0..maxSlot) {
+                                val selected = if (isPinned) slot == currentPinIndex else slot == pendingSlot
+                                val occupantId = pinnedIds.getOrNull(slot)
+                                val slotHint = when {
+                                    isPinned && slot == currentPinIndex -> "Actual"
+                                    occupantId != null -> appsById[occupantId]?.name ?: occupantId
+                                    else -> "Al final"
+                                }
+                                PinSlotChip(
+                                    theme = theme,
+                                    positionNumber = slot + 1,
+                                    hint = slotHint,
+                                    selected = selected,
+                                    onClick = {
+                                        if (isPinned) {
+                                            if (slot != currentPinIndex) {
+                                                onPinAt(slot)
+                                            }
+                                        } else {
+                                            pendingSlot = slot
+                                        }
+                                    }
+                                )
+                            }
+                        }
+
+                        if (!isPinned) {
+                            ActionSheetRowButton(
+                                theme = theme,
+                                icon = Icons.Outlined.PushPin,
+                                label = if (pendingSlot >= pinnedIds.size) {
+                                    "Fijar en posición #${pendingSlot + 1} (Al final)"
+                                } else {
+                                    "Fijar en posición #${pendingSlot + 1}"
+                                },
+                                fill = theme.accentB,
+                                onClick = {
+                                    onPinAt(pendingSlot)
+                                    onDismiss()
+                                }
+                            )
+                        } else {
+                            ActionSheetRowButton(
+                                theme = theme,
+                                icon = Icons.Outlined.PushPin,
+                                label = "Quitar de Fijadas",
+                                fill = theme.pinkAccent,
+                                onClick = {
+                                    onUnpin()
+                                    onDismiss()
+                                }
+                            )
+                        }
+                    }
+                }
+
                 if (app.runningCount > 0) {
                     ActionSheetRowButton(
                         theme = theme,
@@ -1729,6 +1869,74 @@ private fun DockAppActionDialog(
                     )
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun PinMoveStepButton(
+    theme: SekaiResolvedTheme,
+    icon: ImageVector,
+    enabled: Boolean,
+    onClick: () -> Unit
+) {
+    SekaiPlate(
+        theme = theme,
+        cornerRadius = 10.dp,
+        shadowOffset = if (enabled) 2.dp else 0.dp,
+        fillColor = if (enabled) theme.accentB else theme.surface,
+        modifier = Modifier
+            .size(30.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .clickable(enabled = enabled, onClick = onClick)
+    ) {
+        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = if (enabled) Color(0xFF1A1110) else theme.inkSub.copy(alpha = 0.4f),
+                modifier = Modifier.size(18.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun PinSlotChip(
+    theme: SekaiResolvedTheme,
+    positionNumber: Int,
+    hint: String,
+    selected: Boolean,
+    onClick: () -> Unit
+) {
+    SekaiPlate(
+        theme = theme,
+        cornerRadius = 12.dp,
+        shadowOffset = if (selected) 2.dp else 1.dp,
+        fillColor = if (selected) theme.accentA else theme.surface,
+        modifier = Modifier
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(onClick = onClick)
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(
+                text = "#$positionNumber",
+                color = if (selected) Color(0xFF1A1110) else theme.ink,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Black
+            )
+            Text(
+                text = hint,
+                color = if (selected) Color(0xFF1A1110).copy(alpha = 0.85f) else theme.inkSub,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.width(58.dp)
+            )
         }
     }
 }

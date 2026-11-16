@@ -1,3 +1,6 @@
+import java.security.MessageDigest
+import java.time.Instant
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
@@ -50,4 +53,52 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.shizuku.api)
     implementation(libs.shizuku.provider)
+}
+
+val syncWebApk = tasks.register("syncWebApk") {
+    val apkFileProvider = layout.buildDirectory.file("outputs/apk/debug/app-debug.apk")
+    val webDir = rootProject.projectDir.parentFile.resolve("web")
+    val appVersionName = android.defaultConfig.versionName ?: "0.1.0"
+    val appVersionCode = android.defaultConfig.versionCode ?: 1
+
+    onlyIf {
+        webDir.isDirectory && apkFileProvider.get().asFile.isFile
+    }
+
+    doLast {
+        val apkFile = apkFileProvider.get().asFile
+        val downloadsDir = webDir.resolve("downloads").apply { mkdirs() }
+        val targetApk = downloadsDir.resolve("controid.apk")
+        apkFile.copyTo(targetApk, overwrite = true)
+
+        val digest = MessageDigest.getInstance("SHA-256")
+        targetApk.inputStream().use { input ->
+            val buf = ByteArray(8192)
+            while (true) {
+                val n = input.read(buf)
+                if (n <= 0) break
+                digest.update(buf, 0, n)
+            }
+        }
+        val sha256 = digest.digest().joinToString("") { "%02x".format(it) }
+        val sizeBytes = targetApk.length()
+        val builtAt = Instant.now().toString()
+
+        val infoJson = """
+            {
+              "filename": "controid.apk",
+              "url": "downloads/controid.apk?v=${sha256.take(12)}",
+              "versionName": "$appVersionName",
+              "versionCode": $appVersionCode,
+              "sizeBytes": $sizeBytes,
+              "sha256": "$sha256",
+              "builtAt": "$builtAt"
+            }
+        """.trimIndent() + "\n"
+        downloadsDir.resolve("apk-info.json").writeText(infoJson)
+    }
+}
+
+tasks.matching { it.name == "assembleDebug" }.configureEach {
+    finalizedBy(syncWebApk)
 }

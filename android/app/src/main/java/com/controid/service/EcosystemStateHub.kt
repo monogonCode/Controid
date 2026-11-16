@@ -60,6 +60,7 @@ interface EcosystemCommands {
     fun refreshDockApps(force: Boolean = false)
     fun launchDockApp(desktopId: String, action: String = "activate")
     fun setDockPinned(desktopId: String, pinned: Boolean)
+    fun setDockPinnedOrder(pinnedIds: List<String>)
     fun sendDockSystemAction(action: String, value: String? = null)
 }
 
@@ -184,6 +185,10 @@ object EcosystemStateHub {
 
     fun setDockPinned(desktopId: String, pinned: Boolean) {
         commands?.setDockPinned(desktopId, pinned)
+    }
+
+    fun setDockPinnedOrder(pinnedIds: List<String>) {
+        commands?.setDockPinnedOrder(pinnedIds)
     }
 
     fun sendDockSystemAction(action: String, value: String? = null) {

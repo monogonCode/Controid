@@ -167,9 +167,29 @@ class DockController(
 
     fun setPinned(desktopId: String, pinned: Boolean) {
         val mux = multiplexerProvider() ?: return
+        EcosystemStateHub.updateDockSnapshot { current ->
+            val updated = if (pinned) {
+                if (desktopId in current.pinnedIds) current.pinnedIds else current.pinnedIds + desktopId
+            } else {
+                current.pinnedIds.filterNot { it == desktopId }
+            }
+            current.copy(pinnedIds = updated)
+        }
         val json = JSONObject()
             .put("desktop_id", desktopId)
             .put("pinned", pinned)
+            .toString()
+        sendDockMessage(mux, ProtocolConstants.DOCK_PIN_SET, json.toByteArray(StandardCharsets.UTF_8))
+    }
+
+    fun setPinnedOrder(pinnedIds: List<String>) {
+        val mux = multiplexerProvider() ?: return
+        val cleaned = pinnedIds.asSequence().filter { it.isNotBlank() }.distinct().toList()
+        EcosystemStateHub.updateDockSnapshot { current ->
+            current.copy(pinnedIds = cleaned)
+        }
+        val json = JSONObject()
+            .put("pinned_ids", JSONArray(cleaned))
             .toString()
         sendDockMessage(mux, ProtocolConstants.DOCK_PIN_SET, json.toByteArray(StandardCharsets.UTF_8))
     }

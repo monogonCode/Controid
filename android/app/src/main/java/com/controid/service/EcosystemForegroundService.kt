@@ -192,6 +192,12 @@ class EcosystemForegroundService : Service() {
             }
         }
 
+        override fun setDockPinnedOrder(pinnedIds: List<String>) {
+            if (::dockController.isInitialized) {
+                dockController.setPinnedOrder(pinnedIds)
+            }
+        }
+
         override fun sendDockSystemAction(action: String, value: String?) {
             if (::dockController.isInitialized) {
                 dockController.sendSystemAction(action, value)
